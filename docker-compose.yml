@@ -1,0 +1,26 @@
+services:
+  server:
+    build: .
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./output:/app/output
+      - ./testdata:/app/testdata
+    command: ["./server"]
+    networks:
+      - audio-network
+
+  client:
+    build: .
+    volumes:
+      - ./testdata:/app/testdata
+      - ./output:/app/output
+    networks:
+      - audio-network
+    entrypoint: ["./client"]
+    depends_on:
+      - server
+
+networks:
+  audio-network:
+    driver: bridge
