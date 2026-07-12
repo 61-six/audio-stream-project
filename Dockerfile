@@ -1,9 +1,5 @@
 FROM docker.m.daocloud.io/library/golang:1.22-alpine AS builder
 
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
-
-RUN apk add --no-cache git gcc musl-dev
-
 WORKDIR /app
 
 COPY go.mod go.sum ./

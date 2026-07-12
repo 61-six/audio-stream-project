@@ -15,6 +15,7 @@ import (
 	"audio-stream-project/internal/session"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -38,10 +39,19 @@ func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
 	var sess *session.Session
 	var trans *ffmpeg.Transcoder
 	var sb *buffer.StreamBuffer
-	var metadata *api.AudioMetadata
+	var audioMetadata *api.AudioMetadata
 	var wg sync.WaitGroup
+	var clientID string
 
 	log.Println("New connection received")
+
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if ok {
+		if ids := md.Get("client-id"); len(ids) > 0 {
+			clientID = ids[0]
+			log.Printf("Client ID from metadata: %s", clientID)
+		}
+	}
 
 	defer func() {
 		if sess != nil {
@@ -73,13 +83,16 @@ func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
 
 		switch msg := req.Message.(type) {
 		case *api.UploadRequest_Metadata:
-			metadata = msg.Metadata
-			log.Printf("Received metadata: filename=%s, client_id=%s", metadata.Filename, metadata.ClientId)
-			sess = s.sessionManager.CreateSession(metadata.ClientId)
+			audioMetadata = msg.Metadata
+			if clientID == "" {
+				clientID = audioMetadata.ClientId
+			}
+			log.Printf("Received metadata: filename=%s, client_id=%s", audioMetadata.Filename, clientID)
+			sess = s.sessionManager.CreateSession(clientID)
 			if sess == nil {
 				return status.Errorf(codes.ResourceExhausted, "max sessions exceeded")
 			}
-			sess.Filename = metadata.Filename
+			sess.Filename = audioMetadata.Filename
 			log.Printf("Session created: %s", sess.ID)
 			// 2. 发送状态更新
 			err = s.sendStatus(stream, sess.ID, "metadata received", int64(0), int32(0))

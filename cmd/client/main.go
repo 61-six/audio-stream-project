@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"                      //gRPC框架
 	"google.golang.org/grpc/credentials/insecure" //不安全凭证
+	"google.golang.org/grpc/metadata"             //gRPC metadata
 )
 
 const (
@@ -50,8 +51,8 @@ func main() {
 	//创建客户端和流
 	client := api.NewAudioServiceClient(conn)
 
-	//创建音频服务的gRPC客户端
-	stream, err := client.Upload(context.Background())
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "client-id", *clientID)
+	stream, err := client.Upload(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create stream: %v", err)
 	}
