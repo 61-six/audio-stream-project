@@ -59,12 +59,12 @@ docker compose up --build
 go run ./cmd/client --file ./testdata/sample.wav
 
 # 方式二：使用 Docker
-docker compose run client --file ./testdata/sample.wav
+docker compose run --rm client --file /app/testdata/sample.wav --address server:50051
 ```
 
 ### 查看输出
 
-转码后的音频文件保存在 `output/{session_id}.pcm`
+转码后的音频文件保存在 `output/{client_id}_{session_id}.pcm`
 
 ## 核心实现说明
 
@@ -108,8 +108,9 @@ docker compose run client --file ./testdata/sample.wav
 
 - 使用 `sync.Map` 管理多个 session
 - goroutine 使用 `defer recover()` 防止 panic 传播
-- gRPC 错误码规范：`InvalidArgument`, `Internal`
-- 连接断开时服务端不会崩溃
+- gRPC 错误码规范：`InvalidArgument`, `Internal`, `ResourceExhausted`
+- **连接断开时资源清理**：使用统一 `defer` 函数确保关闭 Buffer、FFmpeg 进程和移除 Session
+- 使用 `sync.WaitGroup` 等待 goroutine 完成后再释放资源
 
 ### 多 Session 隔离
 
@@ -122,7 +123,7 @@ docker compose run client --file ./testdata/sample.wav
 1. **配置硬编码**：端口、Buffer 大小等参数未支持配置文件
 2. **缺少优雅退出**：FFmpeg 进程可能需要更长时间清理
 3. **无 VAD 检测**：未实现静音检测功能
-4. **单元测试覆盖**：Buffer 和 Processor 缺少单元测试
+4. **集成测试覆盖**：缺少 gRPC + FFmpeg 端到端集成测试、断连清理测试
 5. **无监控指标**：未集成 Prometheus 监控
 
 ## 测试
@@ -142,15 +143,19 @@ go fmt ./...
 # 构建 Docker 镜像
 docker compose build
 
-# 启动服务
+# 启动服务（只启动 server）
 docker compose up -d
 
 # 运行客户端测试
-docker compose run client --file ./testdata/sample.wav
+docker compose run --rm client --file /app/testdata/sample.wav --address server:50051
 
 # 查看日志
 docker compose logs -f
 ```
+
+### Docker 健康检查
+
+服务端配置了 gRPC 端口健康检查（使用 `nc` 检测端口是否监听），客户端会等待服务端健康后再启动。
 
 ## License
 

@@ -23,17 +23,27 @@ type Session struct {
 	AvgEnergy     float64   // 平均能量
 }
 
-// Manager 管理活动会话，提供线程安全绘画操作，支持话术的增删改查
 type Manager struct {
-	sessions sync.Map     // 存储所有会话 (并发安全)
-	mu       sync.RWMutex // 读写锁 (用于额外保护)
+	sessions    sync.Map
+	mu          sync.RWMutex
+	maxSessions int
 }
 
-func NewManager() *Manager {
-	return &Manager{}
+func NewManager(maxSessions int) *Manager {
+	return &Manager{
+		maxSessions: maxSessions,
+	}
 }
 
 func (m *Manager) CreateSession(clientID string) *Session {
+	m.mu.Lock()
+	count := m.SessionCount()
+	if m.maxSessions > 0 && count >= m.maxSessions {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
 	session := &Session{
 		ID:        uuid.New().String(),
 		ClientID:  clientID,

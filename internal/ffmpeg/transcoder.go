@@ -1,24 +1,28 @@
 package ffmpeg
 
 import (
-	"bufio"   // 缓冲读取，用于读取 stderr
-	"context" // 上下文管理，控制进程生命周期
-	"io"      // I/O 接口
-	"os"      // 文件操作
-	"os/exec" // 执行外部命令
-	"sync"    // 同步原语
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"sync"
 )
 
 type Transcoder struct {
-	cmd        *exec.Cmd          // FFmpeg 命令实例 管理外部命令
-	stdin      io.WriteCloser     // 标准输入管道（写入音频数据）向 FFmpeg 写入原始音频
-	stdout     io.ReadCloser      // 标准输出管道（读取转码后数据）从 FFmpeg 读取转码后音频
-	stderr     *bufio.Scanner     // 标准错误扫描器（读取日志）读取 FFmpeg 日志信息
-	ctx        context.Context    // 上下文 控制命令生命周期
-	cancel     context.CancelFunc // 取消函数 主动终止命令
-	wg         sync.WaitGroup     // 等待 goroutine 完成
-	isRunning  bool               // 运行状态标志 标记转码器是否运行
-	outputPath string             // 输出文件路径 保存转码后文件的位置
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     *bufio.Scanner
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	isRunning  bool
+	outputPath string
+	mu         sync.Mutex
+	runErr     error
+	stderrBuf  []string
 }
 
 // NewTranscoder 创建可取消的上下文 初始化转码器实例 指定输出文件路径
@@ -78,24 +82,37 @@ func (t *Transcoder) Start() error {
 func (t *Transcoder) readStderr() {
 	defer t.wg.Done()
 	for t.stderr.Scan() {
+		t.mu.Lock()
+		t.stderrBuf = append(t.stderrBuf, t.stderr.Text())
+		t.mu.Unlock()
+	}
+	if err := t.stderr.Err(); err != nil {
+		t.mu.Lock()
+		t.runErr = errors.Join(t.runErr, err)
+		t.mu.Unlock()
 	}
 }
 
-// readStdout - 读取转码数据并保存
 func (t *Transcoder) readStdout() {
 	defer t.wg.Done()
-	// 创建输出文件
 	file, err := os.Create(t.outputPath)
 	if err != nil {
+		t.mu.Lock()
+		t.runErr = errors.Join(t.runErr, err)
+		t.mu.Unlock()
 		return
 	}
 	defer file.Close()
-	// 缓冲区 32KB
+
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := t.stdout.Read(buf)
 		if n > 0 {
-			file.Write(buf[:n])
+			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
+				t.mu.Lock()
+				t.runErr = errors.Join(t.runErr, writeErr)
+				t.mu.Unlock()
+			}
 		}
 		if err != nil {
 			break
@@ -103,32 +120,51 @@ func (t *Transcoder) readStdout() {
 	}
 }
 
-// Write 方法 - 写入音频数据
 func (t *Transcoder) Write(data []byte) (int, error) {
-	if !t.isRunning {
+	t.mu.Lock()
+	isRunning := t.isRunning
+	t.mu.Unlock()
+	if !isRunning {
 		return 0, ErrNotRunning
 	}
 	return t.stdin.Write(data)
 }
 
 func (t *Transcoder) Close() error {
+	t.mu.Lock()
 	if !t.isRunning {
-		return nil
+		t.mu.Unlock()
+		return t.runErr
+	}
+	t.isRunning = false
+	t.mu.Unlock()
+
+	t.stdin.Close()
+
+	if err := t.cmd.Wait(); err != nil {
+		t.mu.Lock()
+		t.runErr = errors.Join(t.runErr, err)
+		t.mu.Unlock()
 	}
 
-	t.isRunning = false
+	t.wg.Wait()
 
-	t.stdin.Close() // 1. 关闭输入，FFmpeg 会收到 EOF
+	t.cancel()
 
-	t.cmd.Wait() // 2. 等待 FFmpeg 进程结束
-
-	t.wg.Wait() // 3. 等待 goroutine 完成
-
-	t.cancel() // 4. 取消上下文
-
-	return nil
+	t.mu.Lock()
+	err := t.runErr
+	t.mu.Unlock()
+	return err
 }
 
 func (t *Transcoder) IsRunning() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.isRunning
+}
+
+func (t *Transcoder) GetStderr() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string{}, t.stderrBuf...)
 }

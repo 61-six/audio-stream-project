@@ -9,8 +9,14 @@ services:
     command: ["./server"]
     networks:
       - audio-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 50051 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   client:
+    profiles: ["client"]
     build: .
     volumes:
       - ./testdata:/app/testdata
@@ -18,8 +24,10 @@ services:
     networks:
       - audio-network
     entrypoint: ["./client"]
+    command: ["--file", "/app/testdata/sample.wav", "--address", "server:50051"]
     depends_on:
-      - server
+      server:
+        condition: service_healthy
 
 networks:
   audio-network:

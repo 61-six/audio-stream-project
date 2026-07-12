@@ -18,28 +18,47 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// AudioServer 实现 gRPC 服务接口，管理音频上传和处理
 type AudioServer struct {
-	api.UnimplementedAudioServiceServer                  // 嵌入未实现的服务，保证向前兼容
-	sessionManager                      *session.Manager // 会话管理器
-	outputDir                           string           // 输出目录
+	api.UnimplementedAudioServiceServer
+	sessionManager *session.Manager
+	outputDir      string
 }
 
-func NewAudioServer(outputDir string) *AudioServer {
+func NewAudioServer(outputDir string, maxSessions int) *AudioServer {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Printf("Warning: failed to create output directory %s: %v", outputDir, err)
+	}
 	return &AudioServer{
-		sessionManager: session.NewManager(),
+		sessionManager: session.NewManager(maxSessions),
 		outputDir:      outputDir,
 	}
 }
 
 func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
-	var sess *session.Session       // 会话信息
-	var trans *ffmpeg.Transcoder    // FFmpeg 转码器
-	var sb *buffer.StreamBuffer     // 流缓冲区
-	var metadata *api.AudioMetadata // 元数据
-	var wg sync.WaitGroup           // 等待组
+	var sess *session.Session
+	var trans *ffmpeg.Transcoder
+	var sb *buffer.StreamBuffer
+	var metadata *api.AudioMetadata
+	var wg sync.WaitGroup
 
 	log.Println("New connection received")
+
+	defer func() {
+		if sess != nil {
+			log.Printf("Session closed: %s", sess.ID)
+			s.sessionManager.RemoveSession(sess.ID)
+		}
+		if sb != nil {
+			sb.Close()
+		}
+		wg.Wait()
+		if trans != nil {
+			if err := trans.Close(); err != nil {
+				log.Printf("Error closing transcoder: %v", err)
+			}
+		}
+		log.Println("Connection closed, resources cleaned up")
+	}()
 
 	for {
 		req, err := stream.Recv()
@@ -55,9 +74,11 @@ func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
 		switch msg := req.Message.(type) {
 		case *api.UploadRequest_Metadata:
 			metadata = msg.Metadata
-			log.Printf("Received metadata: filename=%s", metadata.Filename)
-			// 1. 创建会话
-			sess = s.sessionManager.CreateSession("unknown")
+			log.Printf("Received metadata: filename=%s, client_id=%s", metadata.Filename, metadata.ClientId)
+			sess = s.sessionManager.CreateSession(metadata.ClientId)
+			if sess == nil {
+				return status.Errorf(codes.ResourceExhausted, "max sessions exceeded")
+			}
 			sess.Filename = metadata.Filename
 			log.Printf("Session created: %s", sess.ID)
 			// 2. 发送状态更新
@@ -66,7 +87,7 @@ func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
 				return err
 			}
 			// 3. 启动 FFmpeg
-			outputPath := fmt.Sprintf("%s/%s.pcm", s.outputDir, sess.ID)
+			outputPath := fmt.Sprintf("%s/%s_%s.pcm", s.outputDir, sess.ClientID, sess.ID)
 
 			trans = ffmpeg.NewTranscoder(outputPath)
 			err = trans.Start()
@@ -93,39 +114,39 @@ func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
 			}
 
 			chunk := msg.Chunk
-			sess.ReceivedBytes += int64(len(chunk.Data))
-			sess.ChunkCount++
 
-			log.Printf("Chunk received: session=%s, size=%d, chunk_count=%d", sess.ID, len(chunk.Data), sess.ChunkCount)
-			// 1. 发送状态更新
-			err = s.sendStatus(stream, sess.ID, "chunk received", sess.ReceivedBytes, sess.ChunkCount)
-			if err != nil {
-				return err
-			}
-			// 2. 写入缓冲区
 			if sb != nil {
 				err = sb.Write(chunk.Data)
 				if err != nil {
 					log.Printf("Buffer write error: %v", err)
+					return status.Errorf(codes.Internal, "buffer write failed: %v", err)
 				}
 			}
-			// 处理最后一块数据
+
+			sess.ReceivedBytes += int64(len(chunk.Data))
+			sess.ChunkCount++
+
+			log.Printf("Chunk received: session=%s, size=%d, chunk_count=%d", sess.ID, len(chunk.Data), sess.ChunkCount)
+
+			err = s.sendStatus(stream, sess.ID, "chunk received", sess.ReceivedBytes, sess.ChunkCount)
+			if err != nil {
+				return err
+			}
 			if chunk.IsLast {
 				log.Printf("Last chunk received for session: %s", sess.ID)
-				// 1. 关闭缓冲区
 				if sb != nil {
 					sb.Close()
 				}
-				// 2. 等待处理完成
 				wg.Wait()
-				// 3. 关闭转码器
 				if trans != nil {
-					err = trans.Close()
-					if err != nil {
+					if err := trans.Close(); err != nil {
 						log.Printf("Transcoder close error: %v", err)
+						for _, line := range trans.GetStderr() {
+							log.Printf("FFmpeg stderr: %s", line)
+						}
+						return status.Errorf(codes.Internal, "transcode failed: %v", err)
 					}
 				}
-				// 4. 处理输出文件
 				sess.Status = "processing"
 				err = s.sendStatus(stream, sess.ID, "transcode finished", sess.ReceivedBytes, sess.ChunkCount)
 				if err != nil {
@@ -210,7 +231,7 @@ func (s *AudioServer) processBuffer(sess *session.Session, sb *buffer.StreamBuff
 }
 
 func (s *AudioServer) processOutput(sess *session.Session) error {
-	outputPath := fmt.Sprintf("%s/%s.pcm", s.outputDir, sess.ID)
+	outputPath := fmt.Sprintf("%s/%s_%s.pcm", s.outputDir, sess.ClientID, sess.ID)
 	// 1. 读取转码后的 PCM 文件
 	data, err := os.ReadFile(outputPath)
 	if err != nil {
@@ -222,7 +243,7 @@ func (s *AudioServer) processOutput(sess *session.Session) error {
 	sess.FrameCount = stats.FrameCount
 	sess.DurationMs = stats.DurationMs
 	sess.AvgEnergy = stats.AvgEnergy
-	sess.OutputFile = fmt.Sprintf("%s.pcm", sess.ID)
+	sess.OutputFile = fmt.Sprintf("%s_%s.pcm", sess.ClientID, sess.ID)
 
 	log.Printf("Frame statistics: frame_count=%d, duration_ms=%d, avg_energy=%.2f",
 		stats.FrameCount, stats.DurationMs, stats.AvgEnergy)

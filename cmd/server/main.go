@@ -1,14 +1,16 @@
 package main
 
 import (
+	"flag"
 	"log"
-	"net" //网络操作，用于监听tcp连接
+	"net"
 	"os"
 	"os/signal"
-	"syscall" // 系统调用常量
+	"syscall"
 
 	"audio-stream-project/api"
-	audiogrpc "audio-stream-project/internal/grpc" //避免与包名冲突
+	"audio-stream-project/internal/audio"
+	audiogrpc "audio-stream-project/internal/grpc"
 
 	"google.golang.org/grpc"
 )
@@ -18,17 +20,22 @@ const (
 )
 
 func main() {
+	frameMs := flag.Int("frame-ms", 20, "Frame size in milliseconds")
+	maxSessions := flag.Int("max-sessions", 10, "Maximum number of concurrent sessions")
+	flag.Parse()
+
+	audio.SetFrameSizeMs(*frameMs)
+	log.Printf("Frame size set to %d ms (%d bytes)", *frameMs, audio.FrameSizeBytes)
+	log.Printf("Max sessions set to %d", *maxSessions)
 
 	log.Println("Starting audio stream server...")
 
-	// 创建 TCP 监听器
 	listener, err := net.Listen("tcp", port)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	//创建音频服务实例
-	audioServer := audiogrpc.NewAudioServer("./output")
+	audioServer := audiogrpc.NewAudioServer("./output", *maxSessions)
 
 	//创建 gRPC 服务器 默认配置
 	s := grpc.NewServer()

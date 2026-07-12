@@ -1,0 +1,1206 @@
+
+================================================================================
+                    实时音频流处理服务 - 核心代码说明文档
+================================================================================
+
+目录：
+1. audio.proto       - gRPC接口定义
+2. stream_buffer.go  - 流式缓冲区实现
+3. audio_server.go   - gRPC服务端实现
+4. transcoder.go     - FFmpeg转码器实现
+5. processor.go      - 音频分帧处理
+6. docker-compose.yml - Docker部署配置
+
+================================================================================
+1. audio.proto - gRPC接口定义
+================================================================================
+
+【实现原理】
+----------
+采用gRPC双向流式通信模式，定义了完整的音频上传和状态反馈接口。使用protobuf的oneof
+结构实现消息类型的动态选择，支持元数据和数据块两种请求类型，以及状态和摘要两种响应
+类型。
+
+核心设计思想：
+- 请求端：客户端先发送AudioMetadata建立会话，再分块发送AudioChunk，最后用is_last标记结束
+- 响应端：服务端实时返回ProcessingStatus状态，处理完成后返回ProcessingSummary摘要
+
+【核心代码摘要】
+--------------
+// 1. 服务定义 - 双向流式Upload接口
+service AudioService {
+    rpc Upload(stream UploadRequest) returns (stream StatusResponse);
+}
+
+// 2. 请求消息 - oneof结构支持多种消息类型
+message UploadRequest {
+    oneof message {
+        AudioMetadata metadata = 1;
+        AudioChunk chunk = 2;
+    }
+}
+
+// 3. 响应消息 - oneof结构支持状态和摘要
+message StatusResponse {
+    oneof message {
+        ProcessingStatus status = 1;
+        ProcessingSummary summary = 2;
+    }
+}
+
+【具体优势】
+----------
+1. 双向流式传输：客户端上传与服务端状态反馈同时进行，实时性高
+2. oneof结构：避免冗余字段，消息体更小，传输效率更高
+3. Protobuf二进制编码：相比JSON体积小约30-40%，序列化速度快
+4. 扩展性强：可轻松添加新的消息类型和字段
+5. 跨语言支持：可生成多种语言的客户端代码
+
+【流程图】
+--------
+客户端                          服务端
+   |                              |
+   |-- AudioMetadata (首次) ----->|
+   |                              |-- 创建Session
+   |                              |-- 启动FFmpeg
+   |<-- ProcessingStatus --------|
+   |                              |
+   |-- AudioChunk (多次) -------->|
+   |                              |-- 写入Buffer
+   |<-- ProcessingStatus --------|
+   |                              |
+   |-- AudioChunk(is_last=true) ->|
+   |                              |-- 关闭Buffer
+   |                              |-- 等待处理完成
+   |                              |-- 关闭FFmpeg
+   |                              |-- 分帧统计
+   |<-- ProcessingSummary -------|
+   |                              |
+
+ASCII流程图：
+
+    ┌──────────────┐          ┌──────────────┐
+    │   客户端     │          │   服务端     │
+    └──────┬───────┘          └──────┬───────┘
+           │                         │
+           │─── Metadata ───────────>│
+           │                         │
+           │                         │─── 创建Session
+           │                         │─── 启动FFmpeg
+           │<── Status(metadata) ────│
+           │                         │
+           │─── Chunk #1 ───────────>│
+           │<── Status(chunk) ───────│
+           │                         │
+           │─── Chunk #2 ───────────>│
+           │<── Status(chunk) ───────│
+           │                         │
+           │         ...             │
+           │                         │
+           │─── Chunk(last=true) ───>│
+           │                         │─── 关闭Buffer
+           │                         │─── 等待转码
+           │                         │─── 关闭FFmpeg
+           │                         │─── 分帧统计
+           │<── Summary ─────────────│
+           │                         │
+
+================================================================================
+2. stream_buffer.go - 流式缓冲区实现
+================================================================================
+
+【实现原理】
+----------
+基于生产者-消费者模型，使用bytes.Buffer作为底层存储，结合sync.Mutex和sync.Cond实
+现并发安全的阻塞式读写。当缓冲区满时，写入操作阻塞等待；当缓冲区为空时，读取操作
+阻塞等待。支持关闭操作，可唤醒所有等待的goroutine。
+
+核心设计思想：
+- 容量限制：防止内存无限增长（默认1MB）
+- 阻塞策略：写入满时阻塞，读取空时阻塞
+- 条件变量：高效的线程间通知机制，避免忙等待
+
+【核心代码摘要】
+--------------
+type StreamBuffer struct {
+    buf      *bytes.Buffer  // 底层字节缓冲区
+    mu       sync.Mutex     // 互斥锁保护共享资源
+    cond     *sync.Cond     // 条件变量用于线程间通信
+    maxSize  int            // 最大缓冲区大小
+    isClosed bool           // 关闭标志
+}
+
+// Write方法 - 满时阻塞等待
+func (sb *StreamBuffer) Write(data []byte) error {
+    sb.mu.Lock()
+    defer sb.mu.Unlock()
+    for sb.buf.Len()+len(data) > sb.maxSize {
+        sb.cond.Wait()  // 满时阻塞
+    }
+    sb.buf.Write(data)
+    sb.cond.Signal()    // 唤醒等待的读取者
+    return nil
+}
+
+// Read方法 - 空时阻塞等待
+func (sb *StreamBuffer) Read(size int) ([]byte, error) {
+    sb.mu.Lock()
+    defer sb.mu.Unlock()
+    for sb.buf.Len() < size && !sb.isClosed {
+        sb.cond.Wait()  // 空时阻塞
+    }
+    data := sb.buf.Next(size)
+    sb.cond.Signal()    // 唤醒等待的写入者
+    return data, nil
+}
+
+【具体优势】
+----------
+1. 并发安全：使用Mutex保护所有读写操作，支持多生产者多消费者
+2. 内存可控：maxSize限制防止内存爆炸
+3. 高效阻塞：使用Cond条件变量，避免轮询导致的CPU空转
+4. 优雅关闭：Close()通过Broadcast唤醒所有等待的goroutine
+5. 零拷贝：Read方法直接返回底层切片，减少内存分配
+6. 自适应读取：缓冲区数据不足时返回实际可用数据，不强制等待
+
+【流程图】
+--------
+生产者(客户端上传)              StreamBuffer               消费者(转码器)
+         │                           │                           │
+         │── Write(data) ───────────>│                           │
+         │                           │── 检查容量                 │
+         │                           │   ├─ 未满 ──> 写入数据     │
+         │                           │   └─ 已满 ──> Cond.Wait()  │
+         │                           │                           │
+         │                           │<── Signal() ──────────────│
+         │                           │                           │
+         │                           │<── Read(size) ────────────│
+         │                           │── 检查数据量               │
+         │                           │   ├─ 足够 ──> 返回数据     │
+         │                           │   └─ 不足 ──> Cond.Wait()  │
+         │<── Signal() ──────────────│                           │
+         │                           │                           │
+         │── Close() ───────────────>│                           │
+         │                           │── Broadcast() ───────────>│
+         │                           │                           │
+
+ASCII流程图：
+
+    ┌─────────────┐       ┌─────────────────┐       ┌─────────────┐
+    │  生产者     │       │   StreamBuffer  │       │  消费者     │
+    └──────┬──────┘       └────────┬────────┘       └──────┬──────┘
+           │                       │                       │
+           │── Write(data) ───────>│                       │
+           │                       │                       │
+           │                       │── buf.Len() < maxSize?│
+           │                       │       │               │
+           │                       ├─Yes──>│ Write()       │
+           │                       │       │               │
+           │                       │       └── Signal() ──>│
+           │                       │                       │
+           │                       │<── Read(size) ────────│
+           │                       │                       │
+           │                       │── buf.Len() >= size? │
+           │                       │       │               │
+           │                       ├─Yes──>│ Read()        │
+           │                       │       │               │
+           │<── Signal() ──────────│       └── 返回数据    │
+           │                       │                       │
+           │── Close() ───────────>│                       │
+           │                       │── Broadcast() ───────>│
+           │                       │                       │
+
+================================================================================
+3. audio_server.go - gRPC服务端实现
+================================================================================
+
+【实现原理】
+----------
+实现gRPC AudioService接口，管理完整的音频上传和处理流程。采用协程并发模式：主线程
+接收客户端消息，子协程processBuffer负责从缓冲区读取数据并写入FFmpeg转码器。通过
+WaitGroup确保所有子协程完成后再关闭资源。
+
+核心流程：
+1. 接收元数据 → 创建Session → 启动FFmpeg → 创建Buffer → 启动处理协程
+2. 接收数据块 → 更新Session统计 → 写入Buffer
+3. 收到最后一块 → 关闭Buffer → 等待处理完成 → 关闭FFmpeg → 分帧统计 → 返回摘要
+
+【核心代码摘要】
+--------------
+func (s *AudioServer) Upload(stream api.AudioService_UploadServer) error {
+    var sess *session.Session
+    var trans *ffmpeg.Transcoder
+    var sb *buffer.StreamBuffer
+    var wg sync.WaitGroup
+
+    for {
+        req, err := stream.Recv()
+        switch msg := req.Message.(type) {
+        case *api.UploadRequest_Metadata:
+            // 创建会话
+            sess = s.sessionManager.CreateSession("unknown")
+            // 启动FFmpeg
+            trans = ffmpeg.NewTranscoder(outputPath)
+            trans.Start()
+            // 创建缓冲区
+            sb = buffer.NewStreamBuffer(1024 * 1024)
+            // 启动处理协程
+            wg.Add(1)
+            go s.processBuffer(sess, sb, trans, &wg)
+
+        case *api.UploadRequest_Chunk:
+            // 更新统计
+            sess.ReceivedBytes += int64(len(chunk.Data))
+            sess.ChunkCount++
+            // 写入缓冲区
+            sb.Write(chunk.Data)
+
+            if chunk.IsLast {
+                sb.Close()
+                wg.Wait()
+                trans.Close()
+                s.processOutput(sess)
+                // 返回摘要
+                stream.Send(&api.StatusResponse{
+                    Message: &api.StatusResponse_Summary{Summary: summary},
+                })
+                return nil
+            }
+        }
+    }
+}
+
+【具体优势】
+----------
+1. 完整的生命周期管理：从连接建立到资源释放的完整流程
+2. 并发处理：processBuffer独立协程处理数据，不阻塞主接收线程
+3. 优雅退出：WaitGroup确保转码完成后再关闭，避免数据丢失
+4. 错误隔离：defer recover()防止goroutine panic影响主进程
+5. 状态反馈：实时返回ProcessingStatus，客户端可追踪进度
+6. Session隔离：每个连接独立Session，支持多客户端并发
+
+【流程图】
+--------
+gRPC Stream接收
+        │
+        ├─ Metadata消息
+        │       │
+        │       ├─ 创建Session(UUID)
+        │       ├─ 启动FFmpeg进程
+        │       ├─ 创建StreamBuffer(1MB)
+        │       └─ 启动processBuffer协程
+        │               │
+        │               └─ 循环: Read Buffer → Write FFmpeg
+        │
+        ├─ Chunk消息
+        │       │
+        │       ├─ 更新ReceivedBytes/ChunkCount
+        │       ├─ 写入StreamBuffer
+        │       └─ 返回ProcessingStatus
+        │
+        └─ Chunk(is_last=true)
+                │
+                ├─ 关闭StreamBuffer
+                ├─ WaitGroup.Wait() 等待处理完成
+                ├─ 关闭FFmpeg转码器
+                ├─ processOutput() 分帧统计
+                └─ 返回ProcessingSummary
+
+ASCII流程图：
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                      audio_server.go Upload()                        │
+    └─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                            ┌─────────────┐
+                            │ stream.Recv │
+                            └──────┬──────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+             Metadata         Chunk         is_last?
+                    │              │              │
+                    ▼              ▼              ▼
+             ┌───────────┐   更新统计    ┌───────────────┐
+             │创建Session│   写入Buffer   │ sb.Close()    │
+             │启动FFmpeg │              │ wg.Wait()     │
+             │创建Buffer │              │ trans.Close() │
+             │启动协程   │              │ processOutput │
+             └─────┬─────┘              │ 返回Summary   │
+                   │                    └───────────────┘
+                   ▼
+          ┌─────────────────┐
+          │ processBuffer() │
+          │ Read → WriteFF  │
+          └─────────────────┘
+
+================================================================================
+4. transcoder.go - FFmpeg转码器实现
+================================================================================
+
+【实现原理】
+----------
+通过exec包启动FFmpeg进程，使用管道进行数据传输。标准输入(stdin)写入原始音频流，
+标准输出(stdout)读取转码后的PCM数据并写入文件。使用context.WithCancel实现进程的
+优雅终止，通过WaitGroup等待读取协程完成。
+
+FFmpeg参数：
+- -i pipe:0    : 从标准输入读取
+- -acodec pcm_s16le : 输出PCM 16位编码
+- -ac 1        : 单声道
+- -ar 16000    : 采样率16kHz
+- pipe:1       : 输出到标准输出
+
+【核心代码摘要】
+--------------
+func (t *Transcoder) Start() error {
+    args := []string{
+        "-i", "pipe:0",
+        "-acodec", "pcm_s16le",
+        "-ac", "1",
+        "-ar", "16000",
+        "-f", "s16le",
+        "pipe:1",
+    }
+    t.cmd = exec.CommandContext(t.ctx, "ffmpeg", args...)
+
+    t.stdin, _ = t.cmd.StdinPipe()   // 写入原始音频
+    t.stdout, _ = t.cmd.StdoutPipe() // 读取转码后PCM
+    t.cmd.Start()
+
+    t.wg.Add(2)
+    go t.readStderr()  // 消费日志，避免管道阻塞
+    go t.readStdout()  // 读取转码数据并写入文件
+    return nil
+}
+
+func (t *Transcoder) Close() error {
+    t.stdin.Close()    // 发送EOF给FFmpeg
+    t.cmd.Wait()       // 等待进程结束
+    t.wg.Wait()        // 等待读取协程完成
+    t.cancel()         // 取消上下文
+    return nil
+}
+
+【具体优势】
+----------
+1. 进程隔离：FFmpeg作为独立进程运行，崩溃不影响主服务
+2. 管道传输：零拷贝数据传输，性能高效
+3. 优雅退出：先关闭stdin发送EOF，等待FFmpeg处理完剩余数据
+4. 上下文控制：context.WithCancel可强制终止进程
+5. 日志消费：readStderr()防止stderr管道满导致阻塞
+6. 灵活配置：可通过参数调整输出格式、采样率、声道数
+
+【流程图】
+--------
+Start()                          FFmpeg进程                          readStdout()
+    │                                 │                                    │
+    ├─ 创建CommandContext ──────────>│                                    │
+    ├─ 建立StdinPipe ───────────────>│                                    │
+    ├─ 建立StdoutPipe ───────────────>│                                    │
+    ├─ 建立StderrPipe ───────────────>│                                    │
+    └─ cmd.Start() ─────────────────>│                                    │
+                                     │                                    │
+                                     │<── Write(data) ────────────────────│
+                                     │                                    │
+                                     │──> stdout(PCM数据) ────────────────>│
+                                     │                                    │
+                                     │                                    ├─ os.Create(outputPath)
+                                     │                                    └─ 循环写入文件
+                                     │                                    │
+    │                                 │                                    │
+Close()                              │                                    │
+    ├─ stdin.Close() ───────────────>│                                    │
+    │                                 │── 收到EOF，处理剩余数据             │
+    │                                 │── 关闭stdout                       │
+    │                                 └── 进程退出                          │
+    ├─ cmd.Wait() ──────────────────>│                                    │
+    └─ wg.Wait() ─────────────────────────────────────────────────────────>│
+
+ASCII流程图：
+
+    ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+    │  Transcoder │       │   FFmpeg    │       │ readStdout  │
+    └──────┬──────┘       └──────┬──────┘       └──────┬──────┘
+           │                     │                     │
+           │── Start() ─────────>│                     │
+           │                     │                     │
+           │── StdinPipe ───────>│                     │
+           │── StdoutPipe ───────>│                     │
+           │── StderrPipe ───────>│                     │
+           │                     │                     │
+           │                     │<── Write(data) ─────│
+           │                     │                     │
+           │                     │── PCM ──────────────>│
+           │                     │                     │
+           │                     │                     │── 创建文件
+           │                     │                     │── 写入PCM数据
+           │                     │                     │
+           │── Close() ─────────>│                     │
+           │                     │                     │
+           │── stdin.Close() ───>│                     │
+           │                     │── EOF处理           │
+           │                     │── 进程退出          │
+           │                     │                     │
+           │── Wait() ───────────>│                     │
+           │                     │                     │
+           │──────────────────────────────────────────>│── Wait()完成
+
+================================================================================
+5. processor.go - 音频分帧处理
+================================================================================
+
+【实现原理】
+----------
+对转码后的PCM音频数据进行分帧处理，计算每帧的能量统计。帧大小固定为20ms，在16kHz
+采样率、单声道、16位深度下，每帧640字节。通过遍历数据计算RMS能量，统计总帧数、
+时长、平均/最大/最小能量。
+
+帧大小计算：
+FrameSizeBytes = SampleRate * FrameSizeMs / 1000 * Channels * BytesPerSample
+              = 16000 * 20 / 1000 * 1 * 2 = 640 bytes
+
+能量计算（RMS均方根）：
+energy = sqrt(sum(sample_i^2) / sample_count)
+
+【核心代码摘要】
+--------------
+const (
+    SampleRate     = 16000  // 采样率
+    Channels       = 1      // 声道数
+    BytesPerSample = 2      // 每样本字节数
+    FrameSizeMs    = 20     // 帧大小(毫秒)
+)
+
+var FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+
+func ProcessFrames(data []byte) (*FrameStatistics, []float64) {
+    frameCount := len(data) / FrameSizeBytes
+    for i := 0; i < frameCount; i++ {
+        frame := data[i*FrameSizeBytes : (i+1)*FrameSizeBytes]
+        energy := calculateEnergy(frame)
+        stats.FrameCount++
+        stats.TotalEnergy += energy
+        // 更新最大/最小能量
+    }
+    stats.AvgEnergy = stats.TotalEnergy / float64(stats.FrameCount)
+    stats.DurationMs = int64(stats.FrameCount) * int64(FrameSizeMs)
+    return stats, energies
+}
+
+func calculateEnergy(frame []byte) float64 {
+    var energy float64
+    sampleCount := len(frame) / BytesPerSample
+    for i := 0; i < sampleCount; i++ {
+        sample := int16(binary.LittleEndian.Uint16(frame[i*2 : i*2+2]))
+        energy += float64(sample) * float64(sample)
+    }
+    return math.Sqrt(energy / float64(sampleCount))
+}
+
+【具体优势】
+----------
+1. 固定帧大小：20ms帧是语音处理的标准帧长，适合VAD等应用
+2. 高效计算：直接操作字节数组，无额外内存分配
+3. 完整统计：提供总帧数、时长、平均/最大/最小能量
+4. 可扩展性：帧大小可通过常量配置调整
+5. 精确解码：使用LittleEndian正确解析16位PCM数据
+
+【流程图】
+--------
+PCM文件数据
+     │
+     ▼
+计算总帧数 = len(data) / FrameSizeBytes
+     │
+     ▼
+循环 i = 0 to frameCount-1
+     │
+     ├─ 截取帧数据: frame = data[i*640 : (i+1)*640]
+     │
+     ├─ calculateEnergy(frame):
+     │       │
+     │       ├─ 遍历每个采样点(320个)
+     │       ├─ 解析int16值(LittleEndian)
+     │       ├─ 累加 sample^2
+     │       └─ 返回 sqrt(sum/n)
+     │
+     └─ 更新统计:
+             ├─ FrameCount++
+             ├─ TotalEnergy += energy
+             ├─ 更新MaxEnergy
+             └─ 更新MinEnergy
+     │
+     ▼
+计算 AvgEnergy = TotalEnergy / FrameCount
+计算 DurationMs = FrameCount * 20
+     │
+     ▼
+返回 FrameStatistics
+
+ASCII流程图：
+
+    ┌──────────────────────────────────────────────────────┐
+    │                   processor.go                        │
+    └──────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                        ┌────────────────┐
+                        │ 读取PCM文件数据 │
+                        └────────┬───────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────┐
+                    │ frameCount = len/640│
+                    └────────┬────────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ i = 0 to frameCount-1 │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ 截取帧数据       │
+                    │ frame = data[i*640:(i+1)*640] │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ calculateEnergy │
+                    │ ├─ 遍历320采样点│
+                    │ ├─ 解析int16    │
+                    │ ├─ 累加sample^2 │
+                    │ └─ 返回sqrt(sum/n) │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ 更新统计        │
+                    │ FrameCount++    │
+                    │ TotalEnergy +=  │
+                    │ 更新Max/Min     │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ 计算AvgEnergy   │
+                    │ 计算DurationMs  │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │ 返回FrameStatistics │
+                    └─────────────────┘
+
+================================================================================
+6. docker-compose.yml - Docker部署配置
+================================================================================
+
+【实现原理】
+----------
+使用Docker Compose编排服务，定义server和client两个服务。server服务构建镜像并
+启动gRPC服务端，监听50051端口；client服务作为临时容器运行客户端命令。通过volume
+挂载实现宿主机与容器的数据共享（输出目录和测试数据），通过自定义网络实现服务间
+通信。
+
+【核心代码摘要】
+--------------
+services:
+  server:
+    build: .                          # 使用当前目录的Dockerfile构建
+    ports:
+      - "50051:50051"                 # 端口映射
+    volumes:
+      - ./output:/app/output          # 输出目录挂载
+      - ./testdata:/app/testdata      # 测试数据挂载
+    command: ["./server"]             # 启动命令
+    networks:
+      - audio-network
+
+  client:
+    build: .
+    volumes:
+      - ./testdata:/app/testdata
+      - ./output:/app/output
+    entrypoint: ["./client"]          # 入口命令
+    depends_on:
+      - server                        # 依赖server服务
+    networks:
+      - audio-network
+
+networks:
+  audio-network:                      # 自定义网络
+    driver: bridge
+
+【具体优势】
+----------
+1. 一键部署：docker compose up --build 即可启动整个服务
+2. 环境隔离：容器化环境，避免依赖冲突
+3. 网络隔离：自定义网络，服务间通信安全
+4. 数据持久化：volume挂载确保输出文件保存到宿主机
+5. 服务编排：depends_on确保server先于client启动
+6. 可扩展性：轻松添加更多服务（如监控、负载均衡）
+
+【流程图】
+--------
+docker compose up --build
+        │
+        ├─ 构建Docker镜像
+        │       │
+        │       └─ Dockerfile:
+        │               ├─ golang:1.22-alpine (编译阶段)
+        │               ├─ 安装git/gcc/ffmpeg
+        │               ├─ go mod download
+        │               ├─ go build -o server/client
+        │               └─ ubuntu:22.04 (运行阶段)
+        │                       ├─ 复制server/client二进制
+        │                       └─ 复制testdata/output目录
+        │
+        ├─ 创建audio-network网络
+        │
+        ├─ 启动server服务
+        │       │
+        │       ├─ 端口映射: 50051->50051
+        │       ├─ 挂载output/testdata
+        │       └─ 运行 ./server
+        │
+        └─ 启动client服务(按需)
+                │
+                ├─ 等待server启动
+                ├─ 挂载output/testdata
+                └─ 运行 ./client --file /data/sample.wav
+
+ASCII流程图：
+
+    ┌───────────────────────────────────────────────────────────────┐
+    │                    docker compose up --build                   │
+    └───────────────────────────────────────────────────────────────┘
+                                    │
+            ┌───────────────────────┼───────────────────────┐
+            ▼                       ▼                       ▼
+    ┌───────────────┐     ┌─────────────────┐     ┌───────────────┐
+    │ 构建镜像       │     │ 创建网络         │     │ 启动服务       │
+    │               │     │                 │     │               │
+    │ ├─ builder阶段│     │ audio-network   │     │ ├─ server      │
+    │ │ 编译二进制   │     │   bridge模式    │     │ │ 端口50051    │
+    │ └─ runtime阶段│     │                 │     │ │ 挂载目录     │
+    │   复制二进制   │     │                 │     │ └─ client     │
+    │   安装依赖     │     │                 │     │   depends_on  │
+    └───────────────┘     └─────────────────┘     └───────────────┘
+
+================================================================================
+系统整体数据流图
+================================================================================
+
+客户端                    gRPC服务端                     转码处理                    文件系统
+   │                         │                            │                          │
+   │--gRPC流上传------------>│                            │                          │
+   │                         │                            │                          │
+   │                         │--创建Session               │                          │
+   │                         │--启动FFmpeg                │                          │
+   │                         │--创建Buffer                │                          │
+   │                         │                            │                          │
+   │                         │<---processBuffer协程--------│                          │
+   │                         │                            │                          │
+   │                         │--写入Buffer                │                          │
+   │                         │     │                       │                          │
+   │                         │     ▼                       │                          │
+   │                         │--Read Buffer               │                          │
+   │                         │--Write FFmpeg stdin        │                          │
+   │                         │     │                       │                          │
+   │                         │     ▼                       │                          │
+   │                         │                            │--FFmpeg转码               │
+   │                         │                            │--输出PCM到stdout          │
+   │                         │                            │     │                     │
+   │                         │                            │     ▼                     │
+   │                         │                            │--写入output/{id}.pcm------>│
+   │                         │                            │                          │
+   │                         │--processOutput             │                          │
+   │                         │     │                       │                          │
+   │                         │     ▼                       │                          │
+   │                         │--读取PCM文件<---------------│                          │
+   │                         │--分帧统计                   │                          │
+   │                         │     │                       │                          │
+   │                         │     ▼                       │                          │
+   │<--返回ProcessingSummary-│                            │                          │
+   │                         │                            │                          │
+
+ASCII流程图：
+
+    ┌──────────┐      ┌────────────────┐      ┌──────────────┐      ┌──────────┐
+    │  Client  │      │   AudioServer  │      │   Transcoder │      │  Filesys │
+    └────┬─────┘      └───────┬────────┘      └───────┬──────┘      └────┬─────┘
+         │                    │                       │                   │
+         │--Upload(stream)-->│                       │                   │
+         │                    │                       │                   │
+         │                    │--Create Session      │                   │
+         │                    │--Start FFmpeg        │                   │
+         │                    │--Create Buffer       │                   │
+         │                    │                       │                   │
+         │                    │--Write(data)         │                   │
+         │                    │                       │                   │
+         │                    │<--processBuffer------│                   │
+         │                    │                       │                   │
+         │                    │--Read Buffer         │                   │
+         │                    │--Write FFmpeg        │                   │
+         │                    │                       │                   │
+         │                    │                       │--FFmpeg Transcode│
+         │                    │                       │--stdout PCM      │
+         │                    │                       │                   │
+         │                    │                       │--Write File------>│
+         │                    │                       │                   │
+         │                    │--processOutput       │                   │
+         │                    │--Read File<----------│                   │
+         │                    │--Frame Statistics    │                   │
+         │                    │                       │                   │
+         │<--Summary---------│                       │                   │
+         │                    │                       │                   │
+
+================================================================================
+7. 功能增强修改步骤
+================================================================================
+
+以下是5个功能增强的具体修改步骤，包含修改的文件、代码变更和说明。
+
+--------------------------------------------------------------------------------
+7.1 修改一：chunk size 改成命令行参数
+--------------------------------------------------------------------------------
+
+修改文件：cmd/client/main.go
+
+步骤1：添加命令行参数定义
+--------------------------
+在flag.Parse()之前添加：
+    chunkSize := flag.Int("chunk-size", defaultChunkSize, "Chunk size in bytes")
+    clientID := flag.String("client-id", "client", "Client identifier")
+
+步骤2：在元数据中发送client_id
+------------------------------
+修改AudioMetadata创建代码：
+    metadata := &api.AudioMetadata{
+        Filename: filename,
+        ClientId: *clientID,
+    }
+
+步骤3：使用chunkSize变量替代常量
+--------------------------------
+修改缓冲区创建和判断逻辑：
+    buf := make([]byte, *chunkSize)
+    ...
+    if n < *chunkSize {
+        isLast = true
+    }
+
+使用示例：
+    go run ./cmd/client --file testdata/sample.wav --chunk-size 16384 --client-id user001
+
+--------------------------------------------------------------------------------
+7.2 修改二：输出文件名加上 client_id
+--------------------------------------------------------------------------------
+
+修改文件：internal/grpc/audio_server.go
+
+步骤1：修改输出路径格式
+------------------------
+将所有outputPath从：
+    outputPath := fmt.Sprintf("%s/%s.pcm", s.outputDir, sess.ID)
+修改为：
+    outputPath := fmt.Sprintf("%s/%s_%s.pcm", s.outputDir, sess.ClientID, sess.ID)
+
+步骤2：修改会话的OutputFile字段
+--------------------------------
+修改processOutput函数中的赋值：
+    sess.OutputFile = fmt.Sprintf("%s_%s.pcm", sess.ClientID, sess.ID)
+
+步骤3：从metadata中获取client_id创建Session
+-------------------------------------------
+修改CreateSession调用：
+    sess = s.sessionManager.CreateSession(metadata.ClientId)
+
+效果：输出文件名为 "clientID_sessionID.pcm"，便于区分不同客户端的输出
+
+--------------------------------------------------------------------------------
+7.3 修改三：frame size 改成可配置
+--------------------------------------------------------------------------------
+
+修改文件：internal/audio/processor.go, cmd/server/main.go
+
+步骤1：将FrameSizeMs改为变量，添加SetFrameSizeMs函数
+---------------------------------------------------
+在processor.go中修改：
+    var (
+        FrameSizeMs    = 20
+        FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+    )
+
+    func SetFrameSizeMs(ms int) {
+        FrameSizeMs = ms
+        FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+    }
+
+步骤2：在服务端启动时添加命令行参数
+----------------------------------
+在cmd/server/main.go中添加：
+    frameMs := flag.Int("frame-ms", 20, "Frame size in milliseconds")
+    flag.Parse()
+
+    audio.SetFrameSizeMs(*frameMs)
+    log.Printf("Frame size set to %d ms (%d bytes)", *frameMs, audio.FrameSizeBytes)
+
+使用示例：
+    go run ./cmd/server --frame-ms 30
+
+帧大小与字节数对应关系：
+    10ms → 320 bytes
+    20ms → 640 bytes (默认)
+    30ms → 960 bytes
+    40ms → 1280 bytes
+
+--------------------------------------------------------------------------------
+7.4 修改四：增加最大 session 数限制
+--------------------------------------------------------------------------------
+
+修改文件：internal/session/manager.go, internal/grpc/audio_server.go, cmd/server/main.go
+
+步骤1：修改Manager结构体，添加maxSessions字段
+--------------------------------------------
+在manager.go中：
+    type Manager struct {
+        sessions    sync.Map
+        mu          sync.RWMutex
+        maxSessions int
+    }
+
+    func NewManager(maxSessions int) *Manager {
+        return &Manager{
+            maxSessions: maxSessions,
+        }
+    }
+
+步骤2：修改CreateSession方法，添加数量检查
+------------------------------------------
+在manager.go的CreateSession中：
+    m.mu.Lock()
+    count := m.SessionCount()
+    if m.maxSessions > 0 && count >= m.maxSessions {
+        m.mu.Unlock()
+        return nil
+    }
+    m.mu.Unlock()
+
+步骤3：修改AudioServer，添加maxSessions参数
+------------------------------------------
+在audio_server.go中：
+    func NewAudioServer(outputDir string, maxSessions int) *AudioServer {
+        return &AudioServer{
+            sessionManager: session.NewManager(maxSessions),
+            outputDir:      outputDir,
+        }
+    }
+
+步骤4：在服务端创建时传递maxSessions参数
+---------------------------------------
+在cmd/server/main.go中：
+    maxSessions := flag.Int("max-sessions", 10, "Maximum number of concurrent sessions")
+    flag.Parse()
+
+    audioServer := audiogrpc.NewAudioServer("./output", *maxSessions)
+
+步骤5：在Upload方法中处理Session创建失败
+----------------------------------------
+在audio_server.go中：
+    sess = s.sessionManager.CreateSession(metadata.ClientId)
+    if sess == nil {
+        return status.Errorf(codes.ResourceExhausted, "max sessions exceeded")
+    }
+
+使用示例：
+    go run ./cmd/server --max-sessions 5
+
+--------------------------------------------------------------------------------
+7.5 修改五：增加 Buffer 当前长度日志
+--------------------------------------------------------------------------------
+
+修改文件：internal/buffer/stream_buffer.go
+
+步骤1：添加log包导入
+---------------------
+    import (
+        "bytes"
+        "log"
+        "sync"
+    )
+
+步骤2：在Write方法中添加日志
+----------------------------
+在buf.Write(data)之后添加：
+    log.Printf("[Buffer] written %d bytes, current length: %d/%d bytes", len(data), sb.buf.Len(), sb.maxSize)
+
+日志输出示例：
+    [Buffer] written 32768 bytes, current length: 32768/1048576 bytes
+    [Buffer] written 32768 bytes, current length: 65536/1048576 bytes
+
+--------------------------------------------------------------------------------
+7.6 修改六：上传完成后的 summary response（已实现）
+--------------------------------------------------------------------------------
+
+说明：此功能在原始代码中已经实现，位于audio_server.go的Upload方法末尾。
+
+流程：
+1. 收到最后一块数据(chunk.IsLast=true)
+2. 关闭缓冲区 → sb.Close()
+3. 等待处理协程完成 → wg.Wait()
+4. 关闭转码器 → trans.Close()
+5. 处理输出文件 → s.processOutput(sess)
+6. 发送ProcessingSummary响应
+
+ProcessingSummary包含的字段：
+    - SessionId: 会话ID
+    - ReceivedBytes: 接收总字节数
+    - ChunkCount: 接收总块数
+    - OutputFormat: 输出格式
+    - FrameSize: 帧大小（字节）
+    - FrameCount: 总帧数
+    - DurationMs: 时长（毫秒）
+    - AvgEnergy: 平均能量
+    - OutputFile: 输出文件路径
+
+客户端收到Summary后的输出示例：
+    Processing Summary:
+      session_id: 3ff0e53b-8ea9-4872-bd56-2395508af505
+      received_bytes: 264678
+      chunk_count: 9
+      output_format: pcm_s16le, 16000Hz, mono
+      frame_size: 640 bytes
+      frame_count: 150
+      duration_ms: 3000
+      avg_energy: 2895.71
+      output_file: client_3ff0e53b-8ea9-4872-bd56-2395508af505.pcm
+
+================================================================================
+8. 项目启动命令与日志查看
+================================================================================
+
+以下是项目所有启动命令、日志查看命令和测试命令的完整列表。
+
+--------------------------------------------------------------------------------
+8.1 本地开发环境启动
+--------------------------------------------------------------------------------
+
+【1. 启动服务端】
+-----------------
+# 默认参数启动
+go run ./cmd/server
+
+# 指定帧大小和最大session数
+go run ./cmd/server --frame-ms 20 --max-sessions 10
+
+# 服务端启动日志示例：
+# 2026/07/12 10:00:00 Frame size set to 20 ms (640 bytes)
+# 2026/07/12 10:00:00 Max sessions set to 10
+# 2026/07/12 10:00:00 Starting audio stream server...
+# 2026/07/12 10:00:00 Server listening on :50051
+
+【2. 启动客户端上传】
+---------------------
+# 默认参数上传
+go run ./cmd/client --file testdata/sample.wav
+
+# 指定chunk大小和客户端ID
+go run ./cmd/client --file testdata/sample.wav --chunk-size 32768 --client-id user001
+
+# 连接远程服务器
+go run ./cmd/client --address localhost:50051 --file testdata/sample.wav
+
+# 客户端上传日志示例：
+# 2026/07/12 10:01:00 Sent metadata: sample.wav
+# 2026/07/12 10:01:00 Upload completed: 9 chunks, 264678 bytes
+# 2026/07/12 10:01:00 Status: session=xxx, received=0 bytes, chunks=0, status=metadata received
+# 2026/07/12 10:01:00 Status: session=xxx, received=32768 bytes, chunks=1, status=chunk received
+# ...
+# 2026/07/12 10:01:01 Processing Summary:
+#   session_id: xxx
+#   received_bytes: 264678
+#   chunk_count: 9
+#   output_format: pcm_s16le, 16000Hz, mono
+#   frame_size: 640 bytes
+#   frame_count: 150
+#   duration_ms: 3000
+#   avg_energy: 2895.71
+#   output_file: user001_xxx.pcm
+# 2026/07/12 10:01:01 Upload and processing completed successfully
+
+【3. 编译项目】
+---------------
+# 编译服务端和客户端
+go build ./...
+
+# 单独编译服务端
+go build -o server.exe ./cmd/server
+
+# 单独编译客户端
+go build -o client.exe ./cmd/client
+
+【4. 代码检查】
+---------------
+# 静态检查
+go vet ./...
+
+# 格式化代码
+go fmt ./...
+
+# 运行所有测试
+go test ./...
+
+# 带race检测运行测试（需要CGO_ENABLED=1）
+CGO_ENABLED=1 go test -race ./...
+
+--------------------------------------------------------------------------------
+8.2 Docker容器环境启动
+--------------------------------------------------------------------------------
+
+【1. 构建并启动服务端】
+-----------------------
+# 构建并后台启动服务端
+docker compose up --build -d server
+
+# 仅启动服务端（不重新构建）
+docker compose up -d server
+
+# Docker启动日志示例：
+# [+] Building 15.0s (22/22) FINISHED
+# [+] Running 1/1
+#  ✔ Container audio-stream-project-server-1  Started
+
+【2. 客户端上传（Docker方式）】
+-------------------------------
+# 使用Docker客户端上传
+docker compose run client --file /app/testdata/sample.wav --client-id docker_client
+
+# 指定服务端地址（容器内部网络）
+docker compose run client --address server:50051 --file /app/testdata/sample.wav
+
+【3. 查看服务端日志】
+---------------------
+# 实时查看服务端日志
+docker compose logs -f server
+
+# 查看最近100行日志
+docker compose logs --tail=100 server
+
+# 服务端日志示例：
+# audio-stream-project-server-1  | 2026/07/12 10:00:00 Frame size set to 20 ms (640 bytes)
+# audio-stream-project-server-1  | 2026/07/12 10:00:00 Max sessions set to 10
+# audio-stream-project-server-1  | 2026/07/12 10:00:00 Starting audio stream server...
+# audio-stream-project-server-1  | 2026/07/12 10:00:00 Server listening on :50051
+# audio-stream-project-server-1  | 2026/07/12 10:01:00 New connection received
+# audio-stream-project-server-1  | 2026/07/12 10:01:00 Received metadata: filename=sample.wav, client_id=user001
+# audio-stream-project-server-1  | 2026/07/12 10:01:00 Session created: xxx
+# audio-stream-project-server-1  | 2026/07/12 10:01:00 FFmpeg started
+# audio-stream-project-server-1  | 2026/07/12 10:01:00 [Buffer] written 32768 bytes, current length: 32768/1048576 bytes
+# audio-stream-project-server-1  | 2026/07/12 10:01:01 Session completed: xxx
+
+【4. 查看客户端日志】
+---------------------
+# 查看客户端容器日志（容器退出后仍可查看）
+docker compose logs client
+
+【5. 停止服务】
+---------------
+# 停止所有服务
+docker compose down
+
+# 停止并删除容器、网络、卷
+docker compose down -v
+
+# 停止并删除镜像
+docker compose down --rmi all
+
+【6. 查看容器状态】
+-------------------
+# 查看所有运行中的容器
+docker compose ps
+
+# 查看容器详细信息
+docker inspect audio-stream-project-server-1
+
+【7. 进入容器内部】
+-------------------
+# 进入服务端容器
+docker compose exec server bash
+
+# 查看输出文件
+docker compose exec server ls -la /app/output
+
+--------------------------------------------------------------------------------
+8.3 多客户端测试命令
+--------------------------------------------------------------------------------
+
+【1. 同时启动多个客户端】
+-------------------------
+# 在不同终端窗口执行：
+# 终端1：
+go run ./cmd/client --file testdata/sample.wav --client-id client_a
+
+# 终端2：
+go run ./cmd/client --file testdata/sample.wav --client-id client_b
+
+# 终端3：
+go run ./cmd/client --file testdata/sample.wav --client-id client_c
+
+【2. 验证多客户端输出】
+-----------------------
+# 查看output目录下的文件
+ls -la output/
+
+# 预期输出：
+# -rw-r--r-- 1 user user 96000 Jul 12 10:01 client_a_xxx.pcm
+# -rw-r--r-- 1 user user 96000 Jul 12 10:01 client_b_yyy.pcm
+# -rw-r--r-- 1 user user 96000 Jul 12 10:01 client_c_zzz.pcm
+
+--------------------------------------------------------------------------------
+8.4 常见问题排查命令
+--------------------------------------------------------------------------------
+
+【1. 检查端口占用】
+-------------------
+# Windows PowerShell
+netstat -ano | findstr :50051
+
+# Linux/Mac
+lsof -i :50051
+
+# 查看占用进程
+# Windows: 根据PID查找进程
+tasklist | findstr <PID>
+
+# Linux/Mac: 根据PID查找进程
+ps aux | grep <PID>
+
+【2. 检查Docker服务状态】
+-------------------------
+# 检查Docker是否运行
+docker ps
+
+# 检查Docker Compose服务状态
+docker compose ps
+
+【3. 检查输出文件】
+-------------------
+# 查看输出文件大小
+ls -la output/
+
+# 验证PCM文件内容（前16字节十六进制）
+xxd output/client_xxx.pcm | head -1
+
+# 计算文件时长（字节数 / 32 = 秒数，因为16kHz单声道16位PCM每秒32000字节）
+# 例如：96000字节 / 32000 = 3秒
+
+【4. 清理输出目录】
+-------------------
+# 删除所有输出文件
+rm -f output/*.pcm
+
+# Windows PowerShell
+Remove-Item output/*.pcm
+
+================================================================================
+文件位置：E:\Golang\code\audio-stream-project\core_code_explanation.txt
+================================================================================

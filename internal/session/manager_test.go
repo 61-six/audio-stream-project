@@ -5,7 +5,7 @@ import (
 )
 
 func TestManager_CreateAndGet(t *testing.T) {
-	manager := NewManager()
+	manager := NewManager(10)
 
 	session := manager.CreateSession("test-client")
 	if session == nil {
@@ -25,7 +25,7 @@ func TestManager_CreateAndGet(t *testing.T) {
 }
 
 func TestManager_Remove(t *testing.T) {
-	manager := NewManager()
+	manager := NewManager(10)
 
 	session := manager.CreateSession("test-client")
 	sessionID := session.ID
@@ -39,7 +39,7 @@ func TestManager_Remove(t *testing.T) {
 }
 
 func TestManager_NotFound(t *testing.T) {
-	manager := NewManager()
+	manager := NewManager(10)
 
 	_, ok := manager.GetSession("nonexistent")
 	if ok {
@@ -48,7 +48,7 @@ func TestManager_NotFound(t *testing.T) {
 }
 
 func TestManager_SessionCount(t *testing.T) {
-	manager := NewManager()
+	manager := NewManager(10)
 
 	manager.CreateSession("client1")
 	manager.CreateSession("client2")

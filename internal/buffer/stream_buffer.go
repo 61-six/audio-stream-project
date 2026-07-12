@@ -1,8 +1,9 @@
 package buffer
 
 import (
-	"bytes" // 提供字节缓冲区
-	"sync"  // 提供互斥锁和条件变量
+	"bytes"
+	"log"
+	"sync"
 )
 
 type StreamBuffer struct {
@@ -31,6 +32,10 @@ func (sb *StreamBuffer) Write(data []byte) error {
 		return ErrBufferClosed
 	}
 
+	if len(data) > sb.maxSize {
+		return ErrDataTooLarge
+	}
+
 	for sb.buf.Len()+len(data) > sb.maxSize {
 		sb.cond.Wait()
 		if sb.isClosed {
@@ -42,6 +47,7 @@ func (sb *StreamBuffer) Write(data []byte) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("[Buffer] written %d bytes, current length: %d/%d bytes", len(data), sb.buf.Len(), sb.maxSize)
 	sb.cond.Signal()
 
 	return nil

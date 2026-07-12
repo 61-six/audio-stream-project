@@ -6,14 +6,20 @@ import (
 )
 
 const (
-	SampleRate     = 16000 // 采样率：16kHz
-	Channels       = 1     // 声道数：单声道
-	BytesPerSample = 2     // 每样本字节数：2字节（16位）
-	FrameSizeMs    = 20    // 帧大小：20毫秒
+	SampleRate     = 16000
+	Channels       = 1
+	BytesPerSample = 2
 )
 
-// 计算帧大小
-var FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+var (
+	FrameSizeMs    = 20
+	FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+)
+
+func SetFrameSizeMs(ms int) {
+	FrameSizeMs = ms
+	FrameSizeBytes = (SampleRate * FrameSizeMs / 1000) * Channels * BytesPerSample
+}
 
 // 帧统计结构体
 type FrameStatistics struct {
@@ -61,7 +67,7 @@ func ProcessFrames(data []byte) (*FrameStatistics, []float64) {
 		stats.AvgEnergy = stats.TotalEnergy / float64(stats.FrameCount)
 	}
 
-	stats.DurationMs = int64(stats.FrameCount) * (FrameSizeMs)
+	stats.DurationMs = int64(stats.FrameCount) * int64(FrameSizeMs)
 
 	return stats, energies
 }

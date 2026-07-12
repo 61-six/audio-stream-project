@@ -29,6 +29,7 @@ type AudioMetadata struct {
 	SampleRate int32  `protobuf:"varint,2,opt,name=sample_rate,json=sampleRate,proto3" json:"sample_rate,omitempty"`
 	Channels   int32  `protobuf:"varint,3,opt,name=channels,proto3" json:"channels,omitempty"`
 	Codec      string `protobuf:"bytes,4,opt,name=codec,proto3" json:"codec,omitempty"`
+	ClientId   string `protobuf:"bytes,7,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 }
 
 func (x *AudioMetadata) Reset() {
@@ -87,6 +88,13 @@ func (x *AudioMetadata) GetChannels() int32 {
 func (x *AudioMetadata) GetCodec() string {
 	if x != nil {
 		return x.Codec
+	}
+	return ""
+}
+
+func (x *AudioMetadata) GetClientId() string {
+	if x != nil {
+		return x.ClientId
 	}
 	return ""
 }
