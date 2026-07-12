@@ -61,7 +61,7 @@ func ProcessFrames(data []byte) (*FrameStatistics, []float64) {
 		stats.AvgEnergy = stats.TotalEnergy / float64(stats.FrameCount)
 	}
 
-	stats.DurationMs = int64(stats.FrameCount) * FrameSizeMs
+	stats.DurationMs = int64(stats.FrameCount) * (FrameSizeMs)
 
 	return stats, energies
 }

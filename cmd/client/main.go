@@ -24,8 +24,9 @@ func main() {
 	//----命令行参数解析 用于判断文件参数是否提供
 	address := flag.String("address", defaultAddress, "gRPC server address")
 	filePath := flag.String("file", "", "Path to audio file")
-	flag.Parse()
+	//
 
+	flag.Parse()
 	if *filePath == "" {
 		log.Fatal("Please specify a file with --file flag")
 	}

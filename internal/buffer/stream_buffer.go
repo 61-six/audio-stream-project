@@ -42,9 +42,10 @@ func (sb *StreamBuffer) Write(data []byte) error {
 	if err != nil {
 		return err
 	}
-
 	sb.cond.Signal()
+
 	return nil
+
 }
 
 func (sb *StreamBuffer) Read(size int) ([]byte, error) {
