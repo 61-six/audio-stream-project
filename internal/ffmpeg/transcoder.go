@@ -115,6 +115,12 @@ func (t *Transcoder) readStdout() {
 			}
 		}
 		if err != nil {
+			if err == io.EOF {
+			} else {
+				t.mu.Lock()
+				t.runErr = errors.Join(t.runErr, err)
+				t.mu.Unlock()
+			}
 			break
 		}
 	}
@@ -141,13 +147,22 @@ func (t *Transcoder) Close() error {
 
 	t.stdin.Close()
 
-	if err := t.cmd.Wait(); err != nil {
-		t.mu.Lock()
-		t.runErr = errors.Join(t.runErr, err)
-		t.mu.Unlock()
-	}
-
 	t.wg.Wait()
+
+	if err := t.cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if exitErr.ExitCode() == 0 || exitErr.ExitCode() == 255 {
+			} else {
+				t.mu.Lock()
+				t.runErr = errors.Join(t.runErr, err)
+				t.mu.Unlock()
+			}
+		} else {
+			t.mu.Lock()
+			t.runErr = errors.Join(t.runErr, err)
+			t.mu.Unlock()
+		}
+	}
 
 	t.cancel()
 
