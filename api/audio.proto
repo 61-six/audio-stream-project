@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package audio;
+
+option go_package = "./api";
+
+message AudioMetadata {
+    string filename = 1;
+    int32 sample_rate = 2;
+    int32 channels = 3;
+    string codec = 4;
+    string session_id = 5;
+    int64 total_size = 6;
+}
+
+message AudioChunk {
+    bytes data = 1;
+    bool is_last = 2;
+    int32 sequence = 3;
+}
+
+message UploadRequest {
+    oneof message {
+        AudioMetadata metadata = 1;
+        AudioChunk chunk = 2;
+    }
+}
+
+message ProcessingStatus {
+    string session_id = 1;
+    int64 received_bytes = 2;
+    int32 chunk_count = 3;
+    string status = 4;
+    string error = 5;
+    double progress = 6;
+    int64 processed_bytes = 7;
+}
+
+message ProcessingSummary {
+    string session_id = 1;
+    int64 received_bytes = 2;
+    int32 chunk_count = 3;
+    string output_format = 4;
+    int32 sample_rate = 5;
+    int32 channels = 6;
+    int32 frame_size = 7;
+    int32 frame_count = 8;
+    int64 duration_ms = 9;
+    double avg_energy = 10;
+    double max_energy = 11;
+    double min_energy = 12;
+    string output_file = 13;
+    string status = 14;
+    string error = 15;
+}
+
+message StatusResponse {
+    oneof message {
+        ProcessingStatus status = 1;
+        ProcessingSummary summary = 2;
+    }
+}
+
+service AudioService {
+    rpc Upload(stream UploadRequest) returns (stream StatusResponse);
+}
+
+message HealthRequest {
+    string service = 1;
+}
+
+message HealthResponse {
+    string status = 1;
+    string version = 2;
+    int64 uptime_seconds = 3;
+}
