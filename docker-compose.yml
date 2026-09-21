@@ -1,0 +1,27 @@
+services:
+  server:
+    build: .
+    container_name: audio-repair-studio
+    ports:
+      - "8080:8080"
+    volumes:
+      # 持久化:音频文件、封面、SQLite 数据库
+      - ./storage:/app/storage
+      - ./data:/app/data
+    environment:
+      - ENV=production
+      - SERVER_ADDR=:8080
+      - STORAGE_PATH=/app/storage
+      - DB_PATH=/app/data/library.db
+      - REPAIR_CONCURRENCY=2
+      # Basic Auth:暴露到公网时取消下面两行注释并改成自己的账号密码;
+      # 家庭内网使用可保持注释(不启用认证)
+      # - AUTH_USER=admin
+      # - AUTH_PASSWORD=change-me
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "command -v curl >/dev/null 2>&1 && curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,46 @@
+# 构建产物
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.bin
+*.flac
+*.mp3
+*.wav
+
+# Go 工作目录
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 运行时数据(不入库)
+/storage/original/*
+!/storage/original/.gitkeep
+/storage/repaired/*
+!/storage/repaired/.gitkeep
+/storage/covers/*
+!/storage/covers/.gitkeep
+/storage/import/*
+!/storage/import/.gitkeep
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 日志
+/logs/
+*.log
+*.err
+
+# 测试临时产物
+/testdata/*
+!/testdata/.gitkeep
+
+# 操作系统
+.DS_Store
+Thumbs.db
