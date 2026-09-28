@@ -10,14 +10,15 @@ import (
 
 // Config 应用全局配置
 type Config struct {
-	Env               string // 环境标志:development / production
-	ServerAddr        string // HTTP 监听地址,如 :8080
-	StoragePath      string // 存储根目录(内含 original/repaired/covers 子目录)
-	ImportPath       string // 目录扫描导入:用户投放歌曲的目录(递归扫描)
-	DBPath           string // SQLite 数据库文件路径
-	RepairConcurrency int    // 修复任务并发数
-	AuthUser         string // Basic Auth 用户名(空则不启用认证)
-	AuthPassword     string // Basic Auth 密码(与用户名同时设置才生效)
+	Env                string // 环境标志:development / production
+	ServerAddr         string // HTTP 监听地址,如 :8080
+	StoragePath        string // 存储根目录(内含 original/repaired/covers 子目录)
+	ImportPath         string // 目录扫描导入:用户投放歌曲的目录(递归扫描)
+	DBPath             string // SQLite 数据库文件路径
+	RepairConcurrency  int    // 修复任务并发数
+	AuthUser           string // Basic Auth 用户名(空则不启用认证)
+	AuthPassword       string // Basic Auth 密码(与用户名同时设置才生效)
+	MaxVersionsPerSong int    // 每首歌最大保留版本数,0=不限制(时光机功能)
 }
 
 // Load 从环境变量加载,缺省值适合本地开发
@@ -32,6 +33,7 @@ func Load() *Config {
 		RepairConcurrency:  getint("REPAIR_CONCURRENCY", 2),
 		AuthUser:           getenv("AUTH_USER", ""),
 		AuthPassword:       getenv("AUTH_PASSWORD", ""),
+		MaxVersionsPerSong: getint("MAX_VERSIONS_PER_SONG", 0),
 	}
 	cfg.StoragePath = toAbs(cfg.StoragePath)
 	cfg.ImportPath = toAbs(cfg.ImportPath)
@@ -72,6 +74,17 @@ func (c *Config) OriginalDir() string { return filepath.Join(c.StoragePath, "ori
 
 // RepairedDir 修复后音频目录
 func (c *Config) RepairedDir() string { return filepath.Join(c.StoragePath, "repaired") }
+
+// RepairedVersionPath 构造指定版本的修复文件相对路径(如 repaired/<songID>/v1.flac)
+// 参数是 songID(字符串) 和 version(整数),ext 含点号如 ".flac"
+func (c *Config) RepairedVersionPath(songID string, version int, ext string) string {
+	return filepath.ToSlash(filepath.Join("repaired", songID, fmt.Sprintf("v%d%s", version, ext)))
+}
+
+// RepairedVersionAbs 构造指定版本修复文件的绝对路径
+func (c *Config) RepairedVersionAbs(songID string, version int, ext string) string {
+	return filepath.Join(c.RepairedDir(), songID, fmt.Sprintf("v%d%s", version, ext))
+}
 
 // CoversDir 封面图目录
 func (c *Config) CoversDir() string { return filepath.Join(c.StoragePath, "covers") }

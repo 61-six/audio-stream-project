@@ -8,9 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"audio-repair-studio/internal/ffmpeg"
 	"audio-repair-studio/internal/library"
 )
+
+// RepairJob 修复任务(含版本号,供时光机功能使用)
+type RepairJob struct {
+	SongID  string
+	Version int // 版本号:1,2,3...(0 表示旧逻辑兼容,但正常流程 >=1)
+}
 
 // Queue 修复任务队列
 //
@@ -20,10 +28,10 @@ import (
 //   - Cancel 可中断正在执行的修复任务(用于删除歌曲时停止 ffmpeg)
 type Queue struct {
 	store       *library.Store
-	storageRoot string         // 存储根目录,用于拼接绝对路径
+	storageRoot string          // 存储根目录,用于拼接绝对路径
 	concurrency int
 	bus         *ProgressBus
-	jobs        chan string     // 待处理 songID
+	jobs        chan RepairJob   // 待处理任务(含 songID + version)
 	wg          sync.WaitGroup
 
 	mu       sync.Mutex
@@ -40,7 +48,7 @@ func NewQueue(store *library.Store, storageRoot string, concurrency int, bus *Pr
 		storageRoot: storageRoot,
 		concurrency: concurrency,
 		bus:         bus,
-		jobs:        make(chan string, 256),
+		jobs:        make(chan RepairJob, 256),
 		cancels:     make(map[string]context.CancelFunc),
 	}
 	for i := 0; i < concurrency; i++ {
@@ -50,11 +58,11 @@ func NewQueue(store *library.Store, storageRoot string, concurrency int, bus *Pr
 	return q
 }
 
-// Submit 投递 songID 到队列。
+// Submit 投递修复任务到队列。
 // 队列满时返回 false(不阻塞调用方),由调用方决定重试或报错。
-func (q *Queue) Submit(songID string) bool {
+func (q *Queue) Submit(songID string, version int) bool {
 	select {
-	case q.jobs <- songID:
+	case q.jobs <- RepairJob{SongID: songID, Version: version}:
 		return true
 	default:
 		return false
@@ -80,12 +88,15 @@ func (q *Queue) Stop() {
 
 func (q *Queue) worker() {
 	defer q.wg.Done()
-	for songID := range q.jobs {
-		q.repairOne(songID)
+	for job := range q.jobs {
+		q.repairOne(job)
 	}
 }
 
-func (q *Queue) repairOne(songID string) {
+func (q *Queue) repairOne(job RepairJob) {
+	songID := job.SongID
+	version := job.Version
+
 	// 可取消 context:删除歌曲时调用 Cancel 会触发 ffmpeg 退出
 	ctx, cancel := context.WithCancel(context.Background())
 	q.mu.Lock()
@@ -111,6 +122,7 @@ func (q *Queue) repairOne(songID string) {
 		return
 	}
 	q.bus.Publish(songID, ProgressEvent{
+		Version: version,
 		Status:  string(library.StatusRepairing),
 		Stage:   "started",
 		Percent: 0,
@@ -125,18 +137,30 @@ func (q *Queue) repairOne(songID string) {
 		}
 	}
 	inAbs := filepath.Join(q.storageRoot, song.OriginalPath)
-	// 输出扩展名跟随用户选择的格式(mp3/flac/wav)
+
+	// 输出路径:按版本组织 repaired/<songID>/v<N>.<ext>
 	outExt := "." + params.OutputFormat
 	if params.OutputFormat == "" {
 		outExt = DefaultExt()
 	}
-	outRel := fmt.Sprintf("repaired/%s%s", songID, outExt)
+	outRel := filepath.ToSlash(filepath.Join("repaired", songID, fmt.Sprintf("v%d%s", version, outExt)))
 	outAbs := filepath.Join(q.storageRoot, outRel)
+
+	// 确保版本目录存在
+	versionDir := filepath.Dir(outAbs)
+	if err := os.MkdirAll(versionDir, 0755); err != nil {
+		log.Printf("[queue] mkdir %s: %v", versionDir, err)
+		_ = q.store.UpdateRepairVersionStatus(songID, version, "failed", fmt.Sprintf("mkdir: %v", err), 0)
+		return
+	}
+
+	startTime := time.Now()
 
 	// 4) 调用修复(进度解析回调)
 	err = Repair(ctx, inAbs, outAbs, params, func(line string) {
 		percent := parseProgressPercent(line, song.DurationMs)
 		q.bus.Publish(songID, ProgressEvent{
+			Version: version,
 			Status:  string(library.StatusRepairing),
 			Stage:   "processing",
 			Percent: percent,
@@ -144,30 +168,45 @@ func (q *Queue) repairOne(songID string) {
 		})
 	})
 
+	elapsed := time.Since(startTime).Milliseconds()
+
 	if err != nil {
 		// 清理半成品修复文件,避免残留
 		_ = os.Remove(outAbs)
 		// context 被取消(歌曲被删除)时不更新 DB(记录可能已删),只记日志
 		if ctx.Err() != nil {
-			log.Printf("[queue] repair %s cancelled", songID)
+			log.Printf("[queue] repair %s v%d cancelled", songID, version)
 			return
 		}
 		_ = q.store.UpdateStatus(songID, library.StatusFailed, "", err.Error())
+		_ = q.store.UpdateRepairVersionStatus(songID, version, "failed", err.Error(), elapsed)
 		q.bus.Publish(songID, ProgressEvent{
-			Status: string(library.StatusFailed),
-			Stage:  "failed",
-			Error:  err.Error(),
+			Version: version,
+			Status:  string(library.StatusFailed),
+			Stage:   "failed",
+			Error:   err.Error(),
 		})
-		log.Printf("[queue] repair %s failed: %v", songID, err)
+		log.Printf("[queue] repair %s v%d failed: %v", songID, version, err)
 		return
 	}
 
-	// 5) 更新数据库
+	// 5) 更新版本记录状态
+	_ = q.store.UpdateRepairVersionStatus(songID, version, "done", "", elapsed)
+
+	// 6) probe 修复文件元数据,写入版本记录
+	if info, perr := ffmpeg.Probe(ctx, outAbs); perr == nil {
+		_ = q.store.UpdateRepairVersionMeta(songID, version, info.SampleRate, info.Bitrate)
+	}
+
+	// 7) 更新 songs 表状态 + 当前版本 + 修复路径
 	if err := q.store.UpdateStatus(songID, library.StatusRepaired, outRel, ""); err != nil {
 		log.Printf("[queue] mark repaired %s: %v", songID, err)
 		return
 	}
+	_ = q.store.SetCurrentVersion(songID, version)
+
 	q.bus.Publish(songID, ProgressEvent{
+		Version: version,
 		Status:  string(library.StatusRepaired),
 		Stage:   "completed",
 		Percent: 100,

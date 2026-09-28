@@ -225,6 +225,39 @@ button { font-family: inherit; }
 .btn-ok { background: var(--red); color: #fff; }
 .btn-ok:hover { opacity: .9; }
 
+/* 整盘模式勾选 + 介质下拉(扫描导入工具栏) */
+.btn-compilation {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px;
+  font-size: 13px; color: #555; cursor: pointer; user-select: none;
+  background: #fafafa;
+}
+.btn-compilation:hover { border-color: var(--red); }
+.btn-compilation input { margin: 0; cursor: pointer; }
+.btn-compilation select {
+  padding: 2px 4px; border: 1px solid #ddd; border-radius: 4px;
+  font-size: 12px; background: #fff;
+}
+
+/* 切割点编辑弹窗内部 */
+.split-hint {
+  font-size: 12px; color: #888; padding: 6px 8px;
+  background: #fff7e6; border-radius: 4px; margin-bottom: 8px;
+}
+.split-section-title {
+  font-size: 13px; font-weight: 600; color: #333; margin: 8px 0 4px;
+}
+.split-spans div, .split-points div { font-size: 12px; color: #666; line-height: 1.6; }
+.split-points label {
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  font-size: 12px; color: #555; margin-bottom: 6px;
+}
+.split-points input {
+  width: 80px; padding: 4px 6px; border: 1px solid #ddd;
+  border-radius: 4px; font-size: 13px;
+}
+#split-points-list { max-height: 50vh; overflow-y: auto; }
+
 /* 扫描导入进度浮层 */
 .import-toast {
   position: fixed;

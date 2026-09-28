@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"audio-repair-studio/internal/library"
@@ -13,9 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// download 下载音频文件(原音 / 修复版)
+// download 下载音频文件(原音 / 修复版,支持按版本下载)
 //
-// GET /api/songs/:id/download?mode=repaired|original
+// GET /api/songs/:id/download?mode=repaired|original&version=N
 //
 // 与 /play 的区别:通过 Content-Disposition: attachment 强制浏览器
 // 弹出"另存为",而不是在线播放;同样支持 HTTP Range(断点续传)。
@@ -36,12 +37,27 @@ func (s *Server) download(c *gin.Context) {
 		relPath = song.OriginalPath
 		suffix = "原版"
 	case library.ModeRepaired:
-		if song.RepairedPath == "" {
+		// 支持按版本下载:?version=N 指定版本
+		if vStr := c.Query("version"); vStr != "" {
+			ver, err := strconv.Atoi(vStr)
+			if err != nil || ver < 1 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version"})
+				return
+			}
+			rv, err := s.store.GetRepairVersion(id, ver)
+			if err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+				return
+			}
+			relPath = rv.Path
+			suffix = fmt.Sprintf("修复版v%d", ver)
+		} else if song.RepairedPath != "" {
+			relPath = song.RepairedPath
+			suffix = "修复版"
+		} else {
 			c.JSON(http.StatusNotFound, gin.H{"error": "repaired version not available yet"})
 			return
 		}
-		relPath = song.RepairedPath
-		suffix = "修复版"
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mode"})
 		return

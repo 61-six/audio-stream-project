@@ -10,11 +10,12 @@ import (
 // ProgressEvent 进度事件(发给 WebSocket 订阅者)
 type ProgressEvent struct {
 	SongID  string    `json:"song_id"`
-	Status  string    `json:"status"`  // repairing/repaired/failed
-	Stage   string    `json:"stage"`   // started/processing/completed/failed
-	Percent int       `json:"percent"` // 0-100
-	Detail  string    `json:"detail"`  // ffmpeg stderr 行(可选)
-	Error   string    `json:"error"`   // 失败原因
+	Version int       `json:"version,omitempty"` // 修复版本号(时光机功能,0=旧逻辑)
+	Status  string    `json:"status"`             // repairing/repaired/failed
+	Stage   string    `json:"stage"`              // started/processing/completed/failed
+	Percent int       `json:"percent"`            // 0-100
+	Detail  string    `json:"detail"`              // ffmpeg stderr 行(可选)
+	Error   string    `json:"error"`              // 失败原因
 	Sent    time.Time `json:"sent"`
 }
 

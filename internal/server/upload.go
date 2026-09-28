@@ -83,7 +83,7 @@ func (s *Server) upload(c *gin.Context) {
 	dst.Close()
 
 	// 探测元信息 → 抽封面 → 入库 → 入修复队列(与目录导入共用)
-	song, err := s.probeAndInsert(id, origRel, origAbs, header.Filename, repairParamsJSON)
+	song, err := s.probeAndInsert(id, origRel, origAbs, header.Filename, repairParamsJSON, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":  "save to db failed",
@@ -105,17 +105,22 @@ func (s *Server) upload(c *gin.Context) {
 //
 // 网页上传与「扫描目录导入」两条链路共用此逻辑,保证入库行为一致。
 // repairParamsJSON 为可选修复参数(JSON),空串或非法时用默认参数。
+// submitQueue 控制是否入修复队列:整盘源不入队(只修切片,不重复修整盘)。
 // 失败时负责清理已落盘的原始文件/封面;成功后返回歌曲实体。
-func (s *Server) probeAndInsert(id, origRel, origAbs, displayName, repairParamsJSON string) (*library.Song, error) {
+func (s *Server) probeAndInsert(id, origRel, origAbs, displayName, repairParamsJSON string, submitQueue bool) (*library.Song, error) {
 	ctx := context.Background()
 	ext := strings.ToLower(filepath.Ext(displayName))
 
 	// 校验修复参数:非法则用空串(队列端会降级为默认参数)
+	// 同时解析出介质类型存到独立列(media_type),便于前端展示与按介质筛选
+	mediaType := ""
 	if repairParamsJSON != "" {
 		var p audio.RepairParams
 		if err := json.Unmarshal([]byte(repairParamsJSON), &p); err != nil {
 			log.Printf("[ingest] invalid repair_params for %s: %v, using defaults", displayName, err)
 			repairParamsJSON = ""
+		} else {
+			mediaType = p.MediaType
 		}
 	}
 
@@ -153,6 +158,7 @@ func (s *Server) probeAndInsert(id, origRel, origAbs, displayName, repairParamsJ
 		Bitrate:          info.Bitrate,
 		Codec:            info.Codec,
 		RepairParams:     repairParamsJSON,
+		MediaType:        mediaType,
 		Status:           library.StatusPending,
 	}
 	if err := s.store.AddSong(song); err != nil {
@@ -164,8 +170,16 @@ func (s *Server) probeAndInsert(id, origRel, origAbs, displayName, repairParamsJ
 	}
 
 	// 入修复队列(队列满时记录日志,歌曲保持 pending 可手动重试)
-	if !s.queue.Submit(id) {
-		log.Printf("[ingest] repair queue full, song %s stays pending", id)
+	// 整盘源跳过入队:整盘源只作切割源,后续切片各自入队修复
+	if submitQueue {
+		// 创建初始版本记录(v1)
+		version, verr := s.store.CreateRepairVersion(id, song.RepairParams, "")
+		if verr != nil {
+			log.Printf("[ingest] create repair version for %s: %v", id, verr)
+		}
+		if !s.queue.Submit(id, version) {
+			log.Printf("[ingest] repair queue full, song %s stays pending", id)
+		}
 	}
 	return song, nil
 }

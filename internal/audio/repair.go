@@ -9,6 +9,17 @@ import (
 	"audio-repair-studio/internal/ffmpeg"
 )
 
+// 介质类型常量:用于按介质预设覆盖修复参数(黑胶/磁带/开盘带)
+//
+// 介质预设聚焦老录音数字化场景:不同介质的噪声形态与修复重点不同,
+// 用户在前端选介质后,服务端 applyMediaPreset 会按介质覆盖相关字段,
+// 用户仍可单独调 OutputFormat(输出格式不在预设覆盖范围内)。
+const (
+	MediaVinyl    = "vinyl"    // 黑胶:爆音/划痕为主,中等底噪
+	MediaCassette = "cassette" // 磁带:嘶声为主,高降噪
+	MediaReel     = "reel"     // 开盘带:音质较好,轻降噪,不动响度
+)
+
 // RepairParams 修复参数(目前采用标准镜链,后续可扩展)
 type RepairParams struct {
 	EnableDenoise    bool    `json:"enable_denoise"`    // 启用降噪
@@ -19,6 +30,7 @@ type RepairParams struct {
 	EnableResample   bool    `json:"enable_resample"`   // 重采样到目标采样率
 	TargetSampleRate int     `json:"target_sample_rate"` // 目标采样率,默认 48000
 	OutputFormat     string  `json:"output_format"`     // 输出格式:wav/flac/mp3,默认 flac
+	MediaType        string  `json:"media_type"`        // 介质类型:vinyl/cassette/reel,空=默认标准链
 }
 
 // DefaultParams 标准镜链参数(适合大多数流行音乐)
@@ -35,9 +47,57 @@ func DefaultParams() RepairParams {
 	}
 }
 
+// applyMediaPreset 按介质类型覆盖修复参数(在 Repair 入口调用)。
+//
+// 覆盖范围:降噪强度/去爆音/响度归一/重采样。
+// 不覆盖:OutputFormat(让用户保留输出格式选择权)。
+// 介质为空或未知时返回 false,调用方按用户参数原样使用。
+//
+// 设计取舍:不做"介质预设完全覆盖用户参数"是因为用户可能想微调,
+// 只覆盖与介质强相关的字段更灵活;但去爆音这类介质强相关开关直接覆盖,
+// 避免用户选"黑胶"却忘了开 declick 导致划痕没去掉。
+func applyMediaPreset(p *RepairParams) bool {
+	switch p.MediaType {
+	case MediaVinyl:
+		// 黑胶:底噪中等,划痕/爆音是主要问题,必须开 declick
+		p.EnableDenoise = true
+		p.DenoiseStrength = 0.4
+		p.EnableDeclick = true
+		p.EnableLoudnorm = true
+		p.TargetLoudness = -16
+		p.EnableResample = true
+		p.TargetSampleRate = 48000
+		return true
+	case MediaCassette:
+		// 磁带:嘶声重,降噪强度提到 0.6;
+		// 磁带爆音少见,关掉 declick 避免误伤人声瞬态
+		p.EnableDenoise = true
+		p.DenoiseStrength = 0.6
+		p.EnableDeclick = false
+		p.EnableLoudnorm = true
+		p.TargetLoudness = -16
+		p.EnableResample = true
+		p.TargetSampleRate = 48000
+		return true
+	case MediaReel:
+		// 开盘带:音质本身较好,轻降噪即可,不动响度(保留原始动态)
+		p.EnableDenoise = true
+		p.DenoiseStrength = 0.2
+		p.EnableDeclick = false
+		p.EnableLoudnorm = false
+		p.EnableResample = true
+		p.TargetSampleRate = 48000
+		return true
+	}
+	return false
+}
+
 // Repair 执行修复(输入文件 → 输出文件)
 // onProgress 用于上报 stderr 进度行(队列订阅器解析后转发到 WebSocket)
 func Repair(ctx context.Context, input, output string, p RepairParams, onProgress func(line string)) error {
+	// 介质预设:若用户指定了介质类型(vinyl/cassette/reel),
+	// 覆盖与介质强相关的字段(降噪强度/去爆音/响度归一等)
+	applyMediaPreset(&p)
 	filters := buildFilterChain(p)
 	args := buildArgs(input, output, filters, p)
 

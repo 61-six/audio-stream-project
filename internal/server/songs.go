@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,8 +152,8 @@ func removeWithRetry(path string, attempts int, interval time.Duration) {
 
 // retryRepair 重新触发修复(仅允许 failed / repaired 状态重试)
 //
-// 重试前会清理旧的修复版文件,避免残留;pending/repairing 状态下
-// 任务已在队列中,重复重试无意义,返回 409。
+// 时光机功能:不删旧修复版,而是创建新版本(v2, v3...),保留历史供 A/B 对比。
+// pending/repairing 状态下任务已在队列中,重复重试无意义,返回 409。
 // 可选接收 repair_params(JSON 字符串)更新修复参数,不传则沿用原参数。
 func (s *Server) retryRepair(c *gin.Context) {
 	id := c.Param("id")
@@ -177,22 +179,173 @@ func (s *Server) retryRepair(c *gin.Context) {
 		newParams = song.RepairParams // 沿用原参数
 	}
 
-	// 关键顺序:先尝试入队,成功后再做破坏性操作(删旧修复版/改状态)。
-	// 否则队列满时会出现:旧修复版已删、状态已变 pending 却没入队,
-	// 已修复的歌就此"丢失"修复版,只能再手动重试。
-	if !s.queue.Submit(id) {
+	// 解析参数以确定输出扩展名(用于构造版本文件路径)
+	params := audio.DefaultParams()
+	if newParams != "" {
+		_ = json.Unmarshal([]byte(newParams), &params)
+	}
+	_ = params // 扩展名由 queue.go 内部构造,此处仅校验参数
+
+	// 创建新版本记录(事务内计算 nextVersion,并发安全)
+	version, err := s.store.CreateRepairVersion(id, newParams, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 关键顺序:先尝试入队,成功后再更新状态。
+	// 入队失败时回滚版本记录。
+	if !s.queue.Submit(id, version) {
+		_, _ = s.store.DeleteRepairVersion(id, version)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "repair queue full, retry later"})
 		return
 	}
 
-	// 入队成功:清理旧修复版文件(若存在),避免新旧格式文件并存残留
-	if song.RepairedPath != "" {
-		_ = os.Remove(filepath.Join(s.cfg.StoragePath, song.RepairedPath))
-	}
-	// 重置状态并按需更新参数
+	// 入队成功:重置状态,更新参数(不删旧修复文件,保留历史版本)
 	_ = s.store.UpdateStatus(id, library.StatusPending, "", "")
 	if newParams != song.RepairParams {
 		_ = s.store.UpdateRepairParams(id, newParams)
 	}
-	c.JSON(http.StatusOK, gin.H{"requeued": id})
+	c.JSON(http.StatusOK, gin.H{"requeued": id, "version": version})
+}
+
+// listVersions 列出指定歌曲的所有修复版本(时光机功能)
+//
+// GET /api/songs/:id/versions
+func (s *Server) listVersions(c *gin.Context) {
+	id := c.Param("id")
+	if _, err := s.store.GetSong(id); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	versions, err := s.store.ListRepairVersions(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"versions": versions})
+}
+
+// setCurrentVersion 设置歌曲当前选中的修复版本(切换播放/下载的版本)
+//
+// PUT /api/songs/:id/versions/current  body: {"version": 2}
+func (s *Server) setCurrentVersion(c *gin.Context) {
+	id := c.Param("id")
+	song, err := s.store.GetSong(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	var body struct {
+		Version int `json:"version"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON"})
+		return
+	}
+	// 检查目标版本是否存在且状态为 done
+	rv, err := s.store.GetRepairVersion(id, body.Version)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+	if rv.Status != "done" {
+		c.JSON(http.StatusConflict, gin.H{"error": "version is not done (status: " + rv.Status + ")"})
+		return
+	}
+	if err := s.store.SetCurrentVersion(id, body.Version); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// 更新 songs.repaired_path 指向当前版本的路径(供兼容旧逻辑)
+	_ = s.store.UpdateStatus(id, song.Status, rv.Path, song.ErrorMsg)
+	c.JSON(http.StatusOK, gin.H{"song_id": id, "current_version": body.Version})
+}
+
+// deleteVersion 删除指定修复版本(不能删当前版本)
+//
+// DELETE /api/songs/:id/versions/:ver
+func (s *Server) deleteVersion(c *gin.Context) {
+	id := c.Param("id")
+	song, err := s.store.GetSong(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	verStr := c.Param("ver")
+	ver, err := strconv.Atoi(verStr)
+	if err != nil || ver < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version number"})
+		return
+	}
+	// 不能删除当前版本
+	if song.CurrentVersion == ver {
+		c.JSON(http.StatusConflict, gin.H{"error": "cannot delete current version"})
+		return
+	}
+	// 删除版本记录,拿到文件路径后清理磁盘
+	path, err := s.store.DeleteRepairVersion(id, ver)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+	if path != "" {
+		removeWithRetry(filepath.Join(s.cfg.StoragePath, path), 3, 100*time.Millisecond)
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": ver})
+}
+
+// resplit 重新切割整盘源歌曲(POST /api/songs/:id/resplit)
+//
+// 适用场景:整盘导入后切割点不准,前端展示探测结果,用户手动调整后调此接口重切。
+// body 可选 {"points": [12.34, ...]} 不传则用源歌曲 DB 里的 split_points.points。
+//
+// 行为:异步调 splitCompilation 生成新切片,每片入库入修复队列。
+// 注意:不删除旧切片(若 resplit 多次),用户需在前端手动删除旧切片。
+// 后续可加 parent_id 字段实现"重切自动删旧切片"。
+func (s *Server) resplit(c *gin.Context) {
+	id := c.Param("id")
+	song, err := s.store.GetSong(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	if song.SplitPoints == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "song is not a compilation source (no split_points)"})
+		return
+	}
+
+	// 解析现有 split_points(包含 spans + points)
+	var result audio.SilenceDetectResult
+	if err := json.Unmarshal([]byte(song.SplitPoints), &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid split_points JSON"})
+		return
+	}
+
+	// 可选:body 里的 points 覆盖(用户手动调整后的切割点)
+	var body struct {
+		Points []float64 `json:"points"`
+	}
+	if err := c.ShouldBindJSON(&body); err == nil && len(body.Points) > 0 {
+		result.Points = body.Points
+	}
+	if len(result.Points) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no split points"})
+		return
+	}
+
+	points := result.Points
+	mediaType := song.MediaType
+	ext := filepath.Ext(song.OriginalPath)
+	sourceAbs := filepath.Join(s.cfg.StoragePath, song.OriginalPath)
+	sourceName := song.OriginalFilename
+
+	// 异步切割(避免长请求阻塞)
+	go func() {
+		if err := s.splitCompilation(id, sourceAbs, ext, sourceName, mediaType, points); err != nil {
+			log.Printf("[resplit] %s: %v", id, err)
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{"resplit": id, "points": len(points)})
 }

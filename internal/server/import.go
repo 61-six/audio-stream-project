@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -21,16 +23,26 @@ var importing atomic.Bool
 
 // importScan 扫描导入目录并批量入库
 //
-// POST /api/import
+// POST /api/import?compilation=1&media_type=vinyl
 //
 // 使用方式:用户把歌曲文件(可含子目录)放到服务器的导入目录(IMPORT_DIR,
 // 默认 storage/import),点网页上的「扫描导入」按钮触发。
+//
+// 普通模式(默认):每个文件独立入库 + 入修复队列。
+// 整盘模式(?compilation=1):文件作为整盘源入库(不入修复队列),
+//   探测曲间静音 → 切片成独立曲目 → 每片入修复队列;
+//   源文件保留(可重新切割),切割元数据存入 split_points 字段。
+//   media_type 可选(vinyl/cassette/reel),会作为介质预设传给切片的修复参数。
 //
 // 流程:递归扫描音频文件 → 按文件名查重(已入库跳过) → 复制到
 // storage/original → ffprobe/封面/入库/入修复队列(复用 probeAndInsert)。
 // 导入在后台执行,进度通过 WebSocket 推送(stage=import_*),完成后前端刷新列表。
 // 采用复制而非移动:导入目录中的原文件保持不动,可安全重复扫描。
 func (s *Server) importScan(c *gin.Context) {
+	// 整盘模式开关:用户在前端勾选"整盘导入"后传 ?compilation=1
+	compilation := c.Query("compilation") == "1"
+	// 介质类型:整盘导入时用于切片的修复参数预设(vinyl/cassette/reel)
+	mediaType := c.Query("media_type")
 	dir := s.cfg.ImportDir()
 
 	// 1) 递归收集音频文件
@@ -99,7 +111,7 @@ func (s *Server) importScan(c *gin.Context) {
 					Percent: (i*100 + filePct) / len(files),
 					Detail:  name,
 				})
-			}); err != nil {
+			}, compilation, mediaType); err != nil {
 				failed++
 				log.Printf("[import] %s failed: %v", name, err)
 			} else {
@@ -124,9 +136,14 @@ func (s *Server) importScan(c *gin.Context) {
 
 // importOne 复制单个文件到存储区并走统一入库流程
 //
-// onCopy 可选回调:复制过程中按文件内百分比(0-100)回调,
-// 用于推送字节级进度(大文件复制时浮层不再卡住不动)。
-func (s *Server) importOne(srcAbs, displayName string, onCopy func(filePct int)) error {
+// 参数:
+//   - onCopy: 复制过程中按文件内百分比(0-100)回调,推送字节级进度
+//   - compilation: 整盘模式(true=作整盘源切割,false=普通入库)
+//   - mediaType: 介质类型(整盘模式传给切片修复参数预设)
+//
+// 普通模式:复制 → 入库 → 入修复队列。
+// 整盘模式:复制 → 入库(不入队)→ 切片 → 每片入库入队。
+func (s *Server) importOne(srcAbs, displayName string, onCopy func(filePct int), compilation bool, mediaType string) error {
 	ext := strings.ToLower(filepath.Ext(displayName))
 	id := uuid.NewString()
 	origRel := fmt.Sprintf("original/%s%s", id, ext)
@@ -143,9 +160,110 @@ func (s *Server) importOne(srcAbs, displayName string, onCopy func(filePct int))
 		return fmt.Errorf("copy %s: %w", displayName, err)
 	}
 
-	if _, err := s.probeAndInsert(id, origRel, origAbs, displayName, ""); err != nil {
+	// 构造 repair_params JSON(含介质类型);空介质时不传参数,用默认
+	repairParamsJSON := ""
+	if mediaType != "" {
+		repairParamsJSON = fmt.Sprintf(`{"media_type":%q}`, mediaType)
+	}
+
+	// 普通模式:入修复队列;整盘模式:不入队(后续切片各自入队)
+	submitQueue := !compilation
+	if _, err := s.probeAndInsert(id, origRel, origAbs, displayName, repairParamsJSON, submitQueue); err != nil {
 		_ = os.Remove(origAbs) // probeAndInsert 内部也会清理,双保险
 		return fmt.Errorf("ingest %s: %w", displayName, err)
+	}
+
+	// 整盘模式:探测曲间静音 → 切片入库
+	if compilation {
+		if err := s.splitCompilation(id, origAbs, ext, displayName, mediaType, nil); err != nil {
+			// 切割失败不致命:源文件已入库,用户可在前端手动重切
+			log.Printf("[import] split %s failed (source still ingested): %v", displayName, err)
+		}
+	}
+	return nil
+}
+
+// splitCompilation 对已入库的整盘源执行曲间静音探测 + 切片入库
+//
+// 流程:
+//  1. 探测曲间静音(噪声 -50dB,最短 1.5s)— 若 points 非空则跳过,用用户调整后的点
+//  2. 折算切割点 → 序列化为 JSON 存到源歌曲的 split_points 字段
+//  3. ffmpeg segment muxer 按切割点切片到临时目录
+//  4. 每片移动到 storage/original/<partUUID>.<ext>,入库并入修复队列
+//
+// 参数:
+//   - points: 用户手动调整后的切割点(秒);nil 时自动探测(首次整盘导入场景)
+//
+// 失败处理:任一步失败都返回错误,但源歌曲已入库不回滚(用户可手动重切)。
+// 切割临时目录在函数返回时清理(切片已移走)。
+// 注意:不删除旧切片(若 resplit 多次),用户需在前端手动删除旧切片。
+// 后续可加 parent_id 字段实现"重切自动删旧切片"。
+func (s *Server) splitCompilation(sourceID, sourceAbs, ext, sourceName, mediaType string, points []float64) error {
+	ctx := context.Background()
+
+	// 1) 探测曲间静音(噪声 -50dB,最短 1.5s)— resplit 时跳过用用户调整的点
+	var result *audio.SilenceDetectResult
+	if len(points) > 0 {
+		// resplit:用用户调整后的切割点,不重新探测
+		result = &audio.SilenceDetectResult{Points: points}
+	} else {
+		r, err := audio.DetectSilence(ctx, sourceAbs, -50, 1.5)
+		if err != nil {
+			return fmt.Errorf("detect silence: %w", err)
+		}
+		result = r
+	}
+	if len(result.Points) == 0 {
+		// 无切割点:整盘可能就一首,源文件已入库即可
+		log.Printf("[split] %s no silence points, source ingested as-is", sourceName)
+		return nil
+	}
+
+	// 2) 切割元数据存 DB(前端可读取展示/手动微调后调 resplit)
+	if jsonBytes, err := json.Marshal(result); err == nil {
+		if err := s.store.UpdateSplitPoints(sourceID, string(jsonBytes)); err != nil {
+			log.Printf("[split] save split_points for %s: %v", sourceID, err)
+		}
+	}
+
+	// 3) 切片到临时目录(避免与 final 路径冲突)
+	splitDir := filepath.Join(s.cfg.StoragePath, "original", "_split_"+sourceID)
+	if err := os.MkdirAll(splitDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir split dir: %w", err)
+	}
+	defer os.RemoveAll(splitDir) // 切片已移走,清理临时目录
+
+	// segment muxer 的输出模板:%03d 会被替换成 000/001/...
+	pattern := filepath.Join(splitDir, fmt.Sprintf("part_%%03d%s", ext))
+	files, err := audio.SplitAtPoints(ctx, sourceAbs, pattern, result.Points)
+	if err != nil {
+		return fmt.Errorf("split: %w", err)
+	}
+
+	// 4) 每片移动到正式位置 → 入库 → 入修复队列
+	for i, f := range files {
+		partID := uuid.NewString()
+		partRel := fmt.Sprintf("original/%s%s", partID, ext)
+		partAbs := filepath.Join(s.cfg.StoragePath, partRel)
+		if err := os.Rename(f, partAbs); err != nil {
+			// 移动失败:跳过这片,继续后续(部分切片仍可用)
+			log.Printf("[split] move part %d (%s): %v", i+1, f, err)
+			continue
+		}
+		// 切片显示名:"<源文件名> - 第 N 首"
+		baseName := strings.TrimSuffix(sourceName, ext)
+		partName := fmt.Sprintf("%s - 第 %d 首%s", baseName, i+1, ext)
+		// 切片继承源文件的介质类型(用预设修复参数)
+		repairParamsJSON := ""
+		if mediaType != "" {
+			repairParamsJSON = fmt.Sprintf(`{"media_type":%q}`, mediaType)
+		}
+		if _, err := s.probeAndInsert(partID, partRel, partAbs, partName, repairParamsJSON, true); err != nil {
+			// 入库失败:该片不入库,文件残留 storage/original 由用户手动清理
+			log.Printf("[split] ingest part %d: %v", i+1, err)
+			_ = os.Remove(partAbs)
+			continue
+		}
 	}
 	return nil
 }

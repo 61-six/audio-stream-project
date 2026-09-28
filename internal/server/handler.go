@@ -64,8 +64,13 @@ func New(cfg *config.Config, store *library.Store, queue *audio.Queue, bus *audi
 		api.DELETE("/songs", s.deleteSongs)
 		api.DELETE("/songs/:id", s.deleteSong)
 		api.POST("/songs/:id/retry", s.retryRepair)
+		api.POST("/songs/:id/resplit", s.resplit)
 		api.POST("/songs/:id/favorite", s.toggleFavorite)
 		api.GET("/songs/:id/download", s.download)
+		// 修复版本管理(时光机功能)
+		api.GET("/songs/:id/versions", s.listVersions)
+		api.PUT("/songs/:id/versions/current", s.setCurrentVersion)
+		api.DELETE("/songs/:id/versions/:ver", s.deleteVersion)
 		api.POST("/import", s.importScan)
 		api.GET("/ws-ticket", s.wsTicket)
 	}

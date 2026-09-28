@@ -5,6 +5,228 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音频修复工作室</title>
 <link rel="stylesheet" href="/static/style.css">
+<style>
+/* ============ 修复版本时光机(内联,只影响本面板) ============ */
+.version-modal {
+  width: 760px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.version-modal .modal-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.version-modal-subtitle {
+  font-size: 13px;
+  font-weight: normal;
+  color: var(--text-2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-refresh,
+.version-close {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.version-refresh { font-size: 16px; }
+.version-refresh:hover { color: var(--red); background: #fbeaea; }
+.version-close { font-size: 18px; margin-left: 4px; }
+.version-close:hover { color: var(--red); background: #fbeaea; }
+
+.version-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.version-list { display: flex; flex-direction: column; gap: 8px; }
+.version-empty {
+  text-align: center;
+  color: var(--text-3);
+  padding: 32px 12px;
+  font-size: 13px;
+}
+
+.version-item {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafafa;
+  transition: border-color .15s, background .15s;
+}
+.version-item:hover { border-color: #ccc; }
+.version-item.current {
+  background: #fff5f5;
+  border-color: var(--red);
+}
+.version-num {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--red);
+  text-align: center;
+  line-height: 1.3;
+}
+.version-cur-dot {
+  display: block;
+  font-size: 10px;
+  color: var(--red);
+  line-height: 1;
+}
+.version-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+  min-width: 0;
+}
+.version-params {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
+}
+.version-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.version-meta span { white-space: nowrap; }
+.version-err {
+  color: #f04a3c;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.version-actions .icon-btn { font-size: 15px; }
+.vbtn-setcurrent {
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.vbtn-setcurrent:hover { border-color: var(--red); color: var(--red); }
+.vbtn-current-tag {
+  font-size: 12px;
+  color: #fff;
+  background: var(--red);
+  padding: 4px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+/* A/B 对比试听 */
+.version-ab {
+  border-top: 1px dashed var(--border);
+  padding-top: 14px;
+}
+.version-ab-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+.version-ab-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.version-ab-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.version-ab-side label {
+  font-size: 13px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.version-ab-side select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  min-width: 0;
+}
+.version-ab-side audio { width: 100%; height: 36px; }
+.version-ab-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.version-ab-actions button {
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 13px;
+  color: var(--text-2);
+  padding: 6px 14px;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.version-ab-actions button:hover { border-color: var(--red); color: var(--red); }
+.version-ab-actions button.primary {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+.version-ab-actions button.primary:hover { background: var(--red-hover); }
+.version-ab-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+  .version-modal { width: 100vw; }
+  .version-ab-row { grid-template-columns: 1fr; }
+  .version-item {
+    grid-template-columns: 48px 1fr;
+  }
+  .version-actions { grid-column: 1 / -1; }
+}
+</style>
 </head>
 <body>
 
@@ -30,6 +252,16 @@
       <button class="tab" data-view="failed">失败<span class="tab-count" id="count-failed">0</span></button>
     </div>
     <div class="toolbar-actions">
+      <!-- 整盘模式:勾选后扫描导入会按曲间静音自动切割成独立曲目 -->
+      <label class="btn-compilation" title="勾选后,扫描导入会按曲间静音把整盘文件切成独立曲目">
+        <input type="checkbox" id="opt-compilation"> 整盘
+        <select id="opt-compilation-media" title="整盘介质类型(影响切片修复预设)">
+          <option value="">默认</option>
+          <option value="vinyl">黑胶</option>
+          <option value="cassette">磁带</option>
+          <option value="reel">开盘带</option>
+        </select>
+      </label>
       <button class="btn-import" id="btn-import" title="把歌曲放到服务器导入目录后,一键批量入库">
         📁 扫描导入
       </button>
@@ -61,7 +293,16 @@
           <option value="mp3">MP3(有损)</option>
         </select>
       </div>
-      <div class="repair-options-tip">默认参数已适合大多数流行音乐,无需调节</div>
+      <div class="repair-options-row">
+        <label>介质类型</label>
+        <select id="opt-media">
+          <option value="">默认(标准链)</option>
+          <option value="vinyl">黑胶(去爆音+划痕)</option>
+          <option value="cassette">磁带(强降噪)</option>
+          <option value="reel">开盘带(轻降噪)</option>
+        </select>
+      </div>
+      <div class="repair-options-tip">选介质会用预设覆盖降噪/响度;输出格式不受影响</div>
     </div>
   </div>
 
@@ -105,6 +346,59 @@
     <div class="modal-footer">
       <button class="btn-cancel" id="edit-cancel">取消</button>
       <button class="btn-ok" id="edit-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 切割点编辑弹窗(整盘源专属) ============ -->
+<div class="modal-mask" id="split-modal" hidden>
+  <div class="modal">
+    <div class="modal-title">切割点编辑</div>
+    <div class="modal-body">
+      <div class="split-hint">调整切割点时间(秒)后点"重新切割",会按新点切片入库(旧切片请手动删除)</div>
+      <div id="split-points-list"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" id="split-cancel">取消</button>
+      <button class="btn-ok" id="split-resplit">重新切割</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 修复版本时光机 ============ -->
+<div class="modal-mask" id="version-modal" hidden>
+  <div class="modal version-modal">
+    <div class="modal-title">
+      修复版本时光机
+      <span class="version-modal-subtitle" id="version-song-name"></span>
+      <button class="version-refresh" id="version-refresh" title="刷新版本列表">🔄</button>
+      <button class="version-close" id="version-close" title="关闭">✕</button>
+    </div>
+    <div class="version-body">
+      <div class="version-list" id="version-list"></div>
+      <div class="version-ab">
+        <div class="version-ab-title">A/B 对比试听</div>
+        <div class="version-ab-row">
+          <div class="version-ab-side">
+            <label>A 版本
+              <select id="ab-select-a"></select>
+            </label>
+            <audio id="ab-audio-a" controls preload="metadata"></audio>
+          </div>
+          <div class="version-ab-side">
+            <label>B 版本
+              <select id="ab-select-b"></select>
+            </label>
+            <audio id="ab-audio-b" controls preload="metadata"></audio>
+          </div>
+        </div>
+        <div class="version-ab-actions">
+          <button id="ab-play-a" type="button">▶ 播放 A</button>
+          <button id="ab-switch" class="primary" type="button" title="保留播放位置在 A/B 之间快速切换">⇄ 同步切到 B</button>
+          <button id="ab-play-b" type="button">▶ 播放 B</button>
+        </div>
+        <div class="version-ab-hint">"同步切换"会保留播放位置,在 A/B 间快速切换;两边也可独立播放对比</div>
+      </div>
     </div>
   </div>
 </div>
@@ -167,5 +461,379 @@
 <audio id="audio" preload="metadata"></audio>
 
 <script src="/static/app.js"></script>
+<script>
+/* ============================================================
+ * 修复版本时光机(内联,只动 index.html 一个文件)
+ * - 通过 MutationObserver 在每行 row-actions 注入 🕘 按钮
+ *   (app.js 的 renderTable 会重建 tbody.innerHTML,所以用 MO 持续注入)
+ * - 点击按钮打开 modal,GET /api/songs/:id/versions 拉历史
+ * - 当前版本号从 state.songs[].current_version 读(后端字段),
+ *   版本列表本身不带 is_current
+ * - A/B 对比:两个独立 <audio>,加"同步切换"按钮保留位置快速切
+ * ============================================================ */
+(function () {
+  'use strict';
+
+  // ---- DOM 引用 ----
+  const verModal    = document.getElementById('version-modal');
+  const verList     = document.getElementById('version-list');
+  const verSongName = document.getElementById('version-song-name');
+  const verClose    = document.getElementById('version-close');
+  const verRefresh  = document.getElementById('version-refresh');
+  const abSelectA   = document.getElementById('ab-select-a');
+  const abSelectB   = document.getElementById('ab-select-b');
+  const abAudioA    = document.getElementById('ab-audio-a');
+  const abAudioB    = document.getElementById('ab-audio-b');
+  const abPlayA     = document.getElementById('ab-play-a');
+  const abPlayB     = document.getElementById('ab-play-b');
+  const abSwitch    = document.getElementById('ab-switch');
+  const mainAudio   = document.getElementById('audio');
+  const mainPlayer  = document.getElementById('player');
+  const tbodyEl     = document.getElementById('songs-list');
+
+  let verSongId = null;     // 当前打开版本面板的歌曲 id
+  let verVersions = [];     // 该歌曲的版本列表
+  let abActive = null;     // 'a' | 'b' | null,当前 A/B 试听活跃方
+
+  // ---- 工具函数(优先复用 app.js 全局函数,缺失则兜底) ----
+  const escL = (typeof esc === 'function') ? esc : (s => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;'));
+  const fmtDurL = (typeof fmtDur === 'function') ? fmtDur : (ms => {
+    if (!ms || ms <= 0) return '--:--';
+    const sec = ms / 1000;
+    if (!isFinite(sec) || sec < 0) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  });
+
+  // 从 params JSON 解析出介质类型/降噪强度/响度/输出格式等摘要
+  function paramsSummary(p) {
+    if (!p) return '默认参数';
+    let obj = p;
+    if (typeof p === 'string') {
+      try { obj = JSON.parse(p); } catch { return '参数解析失败'; }
+    }
+    if (typeof obj !== 'object' || !obj) return '默认参数';
+    const parts = [];
+    if (obj.media_type) {
+      const map = { vinyl: '黑胶', cassette: '磁带', reel: '开盘带' };
+      parts.push(map[obj.media_type] || obj.media_type);
+    }
+    if (obj.denoise_strength != null) parts.push('降噪' + Number(obj.denoise_strength).toFixed(2));
+    if (obj.target_loudness != null) parts.push('响度' + obj.target_loudness);
+    if (obj.output_format) parts.push(String(obj.output_format).toUpperCase());
+    return parts.length ? parts.join(' · ') : '默认参数';
+  }
+
+  function statusHtml(s) {
+    if (!s) return '';
+    const map = {
+      done:     '<span class="badge badge-repaired">完成</span>',
+      failed:   '<span class="badge badge-failed">失败</span>',
+      pending:  '<span class="badge badge-pending">修复中</span>',
+      repairing:'<span class="badge badge-repairing">修复中</span>',
+    };
+    return map[s] || `<span class="badge badge-pending">${escL(s)}</span>`;
+  }
+
+  function fmtDate(ts) {
+    if (!ts) return '-';
+    let d;
+    if (typeof ts === 'number') d = new Date(ts < 1e12 ? ts * 1000 : ts);
+    else if (typeof ts === 'string' && ts) d = new Date(ts);
+    else return '-';
+    if (isNaN(d.getTime())) return String(ts);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fmtMs(ms) { return (!ms || ms <= 0) ? '-' : fmtDurL(ms); }
+
+  // 当前版本号:从 state.songs[].current_version 读(后端字段,
+  // 版本列表本身不带 is_current)
+  function currentVerNum() {
+    if (typeof state === 'undefined' || !state.songs) return 0;
+    const s = state.songs.find(x => x.id === verSongId);
+    return (s && s.current_version) || 0;
+  }
+
+  function songNameById(id) {
+    if (typeof state === 'undefined' || !state.songs) return id;
+    const s = state.songs.find(x => x.id === id);
+    return s ? (s.title || s.original_filename || id) : id;
+  }
+
+  function encId(id) { return encodeURIComponent(String(id)); }
+
+  // ---- 渲染版本列表 ----
+  function renderVersionList() {
+    if (!verVersions.length) {
+      verList.innerHTML = '<div class="version-empty">暂无修复版本(在主列表点 ↻ 重试修复 会创建新版本)</div>';
+      return;
+    }
+    const curVer = currentVerNum();
+    // 版本号倒序:新的在上
+    const sorted = [...verVersions].sort((a, b) => (b.version || 0) - (a.version || 0));
+    verList.innerHTML = sorted.map(v => {
+      const isCurrent = v.version === curVer;
+      const playable = v.status === 'done';
+      const playBtn = playable
+        ? `<button class="icon-btn" data-vact="play" title="试听此版本">▶</button>`
+        : '<span class="icon-btn disabled" title="未完成,无法试听">▶</span>';
+      const dlBtn = playable
+        ? `<a class="icon-btn" data-vact="download" href="/api/songs/${encId(verSongId)}/download?mode=repaired&version=${v.version}" download title="下载此版本">⬇</a>`
+        : '<span class="icon-btn disabled" title="未完成,无法下载">⬇</span>';
+      const delBtn = isCurrent
+        ? '<span class="icon-btn disabled" title="当前版本不能删除">🗑</span>'
+        : `<button class="icon-btn" data-vact="delete" title="删除此版本">🗑</button>`;
+      const setBtn = isCurrent
+        ? '<span class="vbtn-current-tag">当前</span>'
+        : `<button class="vbtn-setcurrent" data-vact="setcurrent" title="设为当前播放/下载版本">设为当前</button>`;
+      const errLine = (v.status === 'failed' && v.error)
+        ? `<div class="version-meta"><span class="version-err" title="${escL(v.error)}">⚠ ${escL(v.error).slice(0, 80)}</span></div>`
+        : '';
+      const extra = [];
+      if (v.v_bitrate) extra.push(`${v.v_bitrate}kbps`);
+      if (v.v_sample_rate) extra.push(`${v.v_sample_rate}Hz`);
+      return `
+        <div class="version-item ${isCurrent ? 'current' : ''}" data-ver="${v.version}">
+          <div class="version-num">${isCurrent ? '<span class="version-cur-dot">●</span>' : ''}v${v.version}</div>
+          <div class="version-info">
+            <div class="version-params">${escL(paramsSummary(v.params))}</div>
+            <div class="version-meta">
+              ${statusHtml(v.status)}
+              <span>耗时 ${fmtMs(v.duration_ms)}</span>
+              <span>${fmtDate(v.created_at)}</span>
+              ${extra.length ? `<span>${extra.join(' · ')}</span>` : ''}
+            </div>
+            ${errLine}
+          </div>
+          <div class="version-actions">${playBtn}${dlBtn}${delBtn}${setBtn}</div>
+        </div>`;
+    }).join('');
+  }
+
+  // ---- A/B 下拉填充(done 状态,且互斥对方已选的版本) ----
+  function fillAbSelect(sel, excludeVer) {
+    const cur = sel.value;
+    const done = verVersions.filter(v => v.status === 'done' && v.version !== excludeVer);
+    sel.innerHTML = '<option value="">(选版本)</option>' +
+      done.map(v => `<option value="${v.version}">v${v.version} · ${escL(paramsSummary(v.params)).slice(0, 24)}</option>`).join('');
+    if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
+  }
+  function renderAbSelects() {
+    const aVal = abSelectA.value ? parseInt(abSelectA.value, 10) : 0;
+    const bVal = abSelectB.value ? parseInt(abSelectB.value, 10) : 0;
+    fillAbSelect(abSelectA, bVal);
+    fillAbSelect(abSelectB, aVal);
+  }
+  function abLoadAudio(which, version) {
+    const a = (which === 'a') ? abAudioA : abAudioB;
+    a.pause();
+    if (!version) { a.removeAttribute('src'); a.load(); return; }
+    a.src = `/play/${encId(verSongId)}?mode=repaired&version=${version}`;
+    a.load();
+  }
+  function updateAbButtons() {
+    abPlayA.textContent = abAudioA.paused ? '▶ 播放 A' : '⏸ 暂停 A';
+    abPlayB.textContent = abAudioB.paused ? '▶ 播放 B' : '⏸ 暂停 B';
+    abSwitch.textContent = (abActive === 'a') ? '⇄ 同步切到 B' : '⇄ 同步切到 A';
+  }
+
+  // ---- 打开/关闭/刷新 ----
+  function resetAb() {
+    abAudioA.pause(); abAudioA.removeAttribute('src'); abAudioA.load();
+    abAudioB.pause(); abAudioB.removeAttribute('src'); abAudioB.load();
+    abSelectA.innerHTML = '<option value="">(选版本)</option>';
+    abSelectB.innerHTML = '<option value="">(选版本)</option>';
+    abActive = null;
+    updateAbButtons();
+  }
+  async function openVersionModal(songId) {
+    verSongId = songId;
+    verSongName.textContent = '· ' + songNameById(songId);
+    verList.innerHTML = '<div class="version-empty">加载中…</div>';
+    verModal.hidden = false;
+    resetAb();
+    await fetchVersions();
+  }
+  async function fetchVersions() {
+    if (!verSongId) return;
+    try {
+      const res = await fetch(`/api/songs/${encId(verSongId)}/versions`);
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        verList.innerHTML = `<div class="version-empty">加载失败:${escL(d.error || res.statusText)}</div>`;
+        return;
+      }
+      const data = await res.json();
+      verVersions = data.versions || [];
+      renderVersionList();
+      renderAbSelects();
+    } catch (e) {
+      verList.innerHTML = `<div class="version-empty">加载失败:${escL(String(e))}</div>`;
+    }
+  }
+  function closeVersionModal() {
+    verModal.hidden = true;
+    resetAb();
+    verSongId = null;
+    verVersions = [];
+  }
+  verClose.addEventListener('click', closeVersionModal);
+  verRefresh.addEventListener('click', fetchVersions);
+  verModal.addEventListener('click', (e) => {
+    if (e.target === verModal) closeVersionModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !verModal.hidden) closeVersionModal();
+  });
+
+  // ---- 版本列表事件委托 ----
+  verList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-vact]');
+    if (!btn) return;
+    const item = btn.closest('.version-item');
+    if (!item) return;
+    const ver = parseInt(item.dataset.ver, 10);
+    const vact = btn.dataset.vact;
+    if (vact === 'download') return; // 直链,走浏览器默认下载
+
+    if (vact === 'play') {
+      // 试听:暂停 A/B,用底部播放器播放该版本
+      abAudioA.pause(); abAudioB.pause();
+      mainAudio.src = `/play/${encId(verSongId)}?mode=repaired&version=${ver}`;
+      mainAudio.play().catch(err => console.warn('play version failed:', err));
+      if (mainPlayer) mainPlayer.hidden = false;
+      return;
+    }
+    if (vact === 'setcurrent') {
+      try {
+        const res = await fetch(`/api/songs/${encId(verSongId)}/versions/current`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: ver }),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          alert('设为当前失败:' + (d.error || ''));
+          return;
+        }
+        // 先刷主列表(current_version 变了),再刷版本面板(用最新 current 渲染高亮)
+        if (typeof fetchSongs === 'function') await fetchSongs();
+        await fetchVersions();
+      } catch (e) { alert('设为当前请求失败:' + e); }
+      return;
+    }
+    if (vact === 'delete') {
+      if (!confirm(`确定删除版本 v${ver}?该版本的修复文件会被清理。`)) return;
+      try {
+        const res = await fetch(`/api/songs/${encId(verSongId)}/versions/${ver}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          alert('删除失败:' + (d.error || ''));
+          return;
+        }
+        if (typeof fetchSongs === 'function') fetchSongs();
+        await fetchVersions();
+      } catch (e) { alert('删除请求失败:' + e); }
+    }
+  });
+
+  // ---- A/B 试听事件 ----
+  abSelectA.addEventListener('change', () => {
+    abLoadAudio('a', abSelectA.value ? parseInt(abSelectA.value, 10) : 0);
+    renderAbSelects();
+    updateAbButtons();
+  });
+  abSelectB.addEventListener('change', () => {
+    abLoadAudio('b', abSelectB.value ? parseInt(abSelectB.value, 10) : 0);
+    renderAbSelects();
+    updateAbButtons();
+  });
+  abPlayA.addEventListener('click', () => {
+    if (!abSelectA.value) { alert('请先选择 A 版本'); return; }
+    if (abAudioA.paused) {
+      abAudioB.pause();
+      abAudioA.play().catch(() => {});
+      abActive = 'a';
+    } else abAudioA.pause();
+    updateAbButtons();
+  });
+  abPlayB.addEventListener('click', () => {
+    if (!abSelectB.value) { alert('请先选择 B 版本'); return; }
+    if (abAudioB.paused) {
+      abAudioA.pause();
+      abAudioB.play().catch(() => {});
+      abActive = 'b';
+    } else abAudioB.pause();
+    updateAbButtons();
+  });
+  abSwitch.addEventListener('click', () => {
+    if (!abSelectA.value || !abSelectB.value) {
+      alert('请先选择 A 和 B 版本');
+      return;
+    }
+    // 同步切换:保留播放位置,在 A/B 之间快速切换
+    const fromAudio = (abActive === 'a') ? abAudioA : abAudioB;
+    const toAudio   = (abActive === 'a') ? abAudioB : abAudioA;
+    const t = fromAudio.currentTime;
+    fromAudio.pause();
+    if (isFinite(t) && t > 0) {
+      const resume = () => {
+        try { toAudio.currentTime = Math.min(t, toAudio.duration || t); } catch (_) {}
+        toAudio.play().catch(() => {});
+      };
+      if (toAudio.readyState >= 1) resume();
+      else toAudio.addEventListener('loadedmetadata', resume, { once: true });
+    } else {
+      toAudio.play().catch(() => {});
+    }
+    abActive = (abActive === 'a') ? 'b' : 'a';
+    updateAbButtons();
+  });
+  [abAudioA, abAudioB].forEach(a => {
+    a.addEventListener('play', updateAbButtons);
+    a.addEventListener('pause', updateAbButtons);
+    a.addEventListener('ended', updateAbButtons);
+  });
+
+  // ---- 行注入:在每行 row-actions 加 🕘 修复版本历史按钮 ----
+  // app.js 的 renderTable 会重建 tbody.innerHTML,所以用 MutationObserver 持续注入
+  function injectHistoryBtn(tr) {
+    const actions = tr.querySelector('.row-actions');
+    if (!actions) return;
+    if (actions.querySelector('[data-ver-action]')) return; // 已注入,跳过
+    const btn = document.createElement('button');
+    btn.className = 'icon-btn';
+    btn.setAttribute('data-ver-action', 'open');
+    btn.title = '修复版本历史(时光机)';
+    btn.textContent = '🕘';
+    // 插到 play 之后(在 download 之前)
+    const playBtn = actions.querySelector('[data-action="play"]');
+    if (playBtn) playBtn.insertAdjacentElement('afterend', btn);
+    else actions.appendChild(btn);
+  }
+  if (tbodyEl) {
+    const obs = new MutationObserver(() => {
+      tbodyEl.querySelectorAll('tr.song-row').forEach(injectHistoryBtn);
+    });
+    obs.observe(tbodyEl, { childList: true });
+    // 首次扫描(app.js 可能已渲染过)
+    tbodyEl.querySelectorAll('tr.song-row').forEach(injectHistoryBtn);
+    // 点击 🕘 按钮打开面板(独立事件委托,与 app.js 的 [data-action] 委托互不冲突:
+    // 该按钮没有 data-action,app.js 的 handler 会 no-op;此处按 data-ver-action 命中)
+    tbodyEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-ver-action]');
+      if (!btn) return;
+      const tr = btn.closest('tr[data-id]');
+      if (!tr) return;
+      openVersionModal(tr.dataset.id);
+    });
+  }
+})();
+</script>
 </body>
 </html>

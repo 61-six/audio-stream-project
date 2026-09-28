@@ -16,6 +16,7 @@ const state = {
   progress: {},         // songId → 修复进度百分比(WS 实时更新)
   selected: new Set(),  // 批量删除选中的 id
   editingId: null,      // 正在编辑的歌曲 id
+  splitId: null,        // 正在编辑切割点的整盘源 id
 };
 
 // ============ DOM 引用 ============
@@ -112,7 +113,9 @@ function collectRepairParams() {
   const denoise = parseFloat($('opt-denoise').value);
   const loudness = parseFloat($('opt-loudness').value);
   const fmt = $('opt-format').value;
-  // 只传与默认值不同的字段,服务端会用 DefaultParams 补齐其余项
+  const media = $('opt-media').value; // 介质类型:vinyl/cassette/reel/空
+  // 服务端会按 media_type 应用预设(覆盖降噪/响度等),用户调节的字段在
+  // 选了介质后会被覆盖;未选介质时按用户参数原样使用
   const params = {
     enable_denoise: true,
     denoise_strength: denoise,
@@ -122,6 +125,7 @@ function collectRepairParams() {
     enable_resample: true,
     target_sample_rate: 48000,
     output_format: fmt,
+    media_type: media,
   };
   return JSON.stringify(params);
 }
@@ -240,6 +244,73 @@ $('edit-modal').addEventListener('click', (e) => {
   if (e.target.id === 'edit-modal') { $('edit-modal').hidden = true; state.editingId = null; }
 });
 
+// ============ 切割点编辑弹窗(整盘源专属) ============
+// openSplitModal 打开切割点弹窗,展示静音段(只读)+ 切割点(可编辑数值)
+function openSplitModal(id) {
+  const song = state.songs.find(s => s.id === id);
+  if (!song || !song.split_points) return;
+  let result;
+  try { result = JSON.parse(song.split_points); }
+  catch (e) { alert('切割点数据损坏: ' + e); return; }
+  state.splitId = id;
+  const list = $('split-points-list');
+  list.innerHTML = '';
+  // 静音段(只读,供用户参考判断切割点是否合理)
+  if (Array.isArray(result.spans) && result.spans.length) {
+    const spansDiv = document.createElement('div');
+    spansDiv.className = 'split-spans';
+    spansDiv.innerHTML = '<div class="split-section-title">静音段(只读)</div>' +
+      result.spans.map((s, i) =>
+        `<div>段${i + 1}: ${s.start.toFixed(2)}s → ${s.end.toFixed(2)}s (静音 ${(s.end - s.start).toFixed(2)}s)</div>`
+      ).join('');
+    list.appendChild(spansDiv);
+  }
+  // 切割点(可编辑数值,提交时收集所有 value)
+  if (Array.isArray(result.points) && result.points.length) {
+    const pointsDiv = document.createElement('div');
+    pointsDiv.className = 'split-points';
+    pointsDiv.innerHTML = '<div class="split-section-title">切割点(秒,可调整)</div>' +
+      result.points.map((p, i) =>
+        `<label>第 ${i + 1} → 第 ${i + 2} 段切割点` +
+        `<input type="number" class="split-point-input" step="0.01" min="0" value="${p.toFixed(2)}"></label>`
+      ).join('');
+    list.appendChild(pointsDiv);
+  }
+  $('split-modal').hidden = false;
+}
+
+$('split-cancel').addEventListener('click', () => { $('split-modal').hidden = true; state.splitId = null; });
+$('split-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'split-modal') { $('split-modal').hidden = true; state.splitId = null; }
+});
+
+// 重新切割:收集所有切割点数值,POST /api/songs/:id/resplit body { points: [...] }
+$('split-resplit').addEventListener('click', async () => {
+  const id = state.splitId;
+  if (!id) return;
+  const inputs = document.querySelectorAll('#split-points-list .split-point-input');
+  const points = Array.from(inputs)
+    .map(inp => parseFloat(inp.value))
+    .filter(v => isFinite(v) && v > 0);
+  if (!points.length) { alert('请输入有效切割点(>0)'); return; }
+  try {
+    const res = await fetch(`/api/songs/${id}/resplit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ points }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert('重新切割失败: ' + (d.error || ''));
+      return;
+    }
+    $('split-modal').hidden = true;
+    state.splitId = null;
+    // 切割是异步,稍等后刷新列表(新切片会陆续出现)
+    setTimeout(fetchSongs, 1500);
+  } catch (e) { alert('重新切割请求失败: ' + e); }
+});
+
 // ============ 封面(统一入口:cover_path → /covers/xxx.jpg,空则音符占位) ============
 function setCover(container, song) {
   container.innerHTML = '';
@@ -311,6 +382,10 @@ function rowHtml(s, i) {
   const retry = s.status === 'failed'
     ? `<button class="icon-btn" data-action="retry" title="重试修复">↻</button>`
     : '';
+  // 切割点编辑:仅整盘源(split_points 非空)显示,可调整后重切
+  const splitBtn = s.split_points
+    ? `<button class="icon-btn" data-action="split" title="查看/调整切割点">✂</button>`
+    : '';
   const playTitle = s.status === 'repaired' ? '播放修复版' : '播放原音';
   const favCls = s.favorite ? 'fav-btn active' : 'fav-btn';
   const checked = state.selected.has(s.id) ? 'checked' : '';
@@ -339,6 +414,7 @@ function rowHtml(s, i) {
           <button class="icon-btn" data-action="play" title="${playTitle}">▶</button>
           ${download}
           ${retry}
+          ${splitBtn}
           <button class="icon-btn" data-action="edit" title="编辑信息">✎</button>
           <button class="icon-btn" data-action="delete" title="删除">🗑</button>
         </div>
@@ -543,6 +619,7 @@ tbody.addEventListener('click', (e) => {
     else if (action === 'delete') deleteSong(id);
     else if (action === 'favorite') toggleFavorite(id);
     else if (action === 'edit') openEditModal(id);
+    else if (action === 'split') openSplitModal(id);
     return;
   }
 });
@@ -636,7 +713,13 @@ function showImportToast(title) {
 btnImport.addEventListener('click', async () => {
   btnImport.disabled = true;
   try {
-    const res = await fetch('/api/import', { method: 'POST' });
+    // 整盘模式:勾选后传 ?compilation=1&media_type=vinyl,服务端会按曲间静音切割
+    const compilation = $('opt-compilation').checked;
+    const media = $('opt-compilation-media').value;
+    const qs = compilation
+      ? ('?compilation=1' + (media ? '&media_type=' + encodeURIComponent(media) : ''))
+      : '';
+    const res = await fetch('/api/import' + qs, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       alert(data.error === 'import already running' ? '已有导入任务正在执行' : `导入失败: ${data.error || ''}`);
@@ -647,7 +730,9 @@ btnImport.addEventListener('click', async () => {
       alert(`导入目录中没有找到音频文件。\n\n请把歌曲文件(可含子目录)放到服务器目录:\n${data.dir || 'storage/import'}\n\n放好后再点「扫描导入」。`);
       return;
     }
-    showImportToast(`正在扫描导入 ${data.found} 首歌曲…`);
+    showImportToast(compilation
+      ? `正在整盘导入 ${data.found} 个文件(切割中)…`
+      : `正在扫描导入 ${data.found} 首歌曲…`);
   } catch (e) {
     alert('导入请求失败: ' + e);
   } finally {
